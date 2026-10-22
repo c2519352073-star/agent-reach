@@ -546,6 +546,17 @@ def _cmd_install(args):
         print("Dry run complete. No changes were made.")
 
 
+def _cmd_update_local(args):
+    """Update the local editable checkout without replacing local fixes."""
+    from agent_reach.update_local import UpdateError, update_local
+
+    try:
+        return update_local(check_only=args.check)
+    except UpdateError as error:
+        print(f"[X] {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+
 def _install_skill(force: bool = True):
     """Install Agent Reach as an agent skill for supported agent clients."""
     import importlib.resources
