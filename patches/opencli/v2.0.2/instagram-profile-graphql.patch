@@ -1,0 +1,94 @@
+--- a/clis/instagram/profile.js
++++ b/clis/instagram/profile.js
+@@ -50,33 +50,65 @@
+     const candidates = [u.profile_pic_url_hd, u.hd_profile_pic_url_info?.url, u.profile_pic_url];
+     return candidates.find((v) => typeof v === 'string' && v.startsWith('https://')) || '';
+   }
+-  const r1 = await fetch(
+-    'https://www.instagram.com/api/v1/users/web_profile_info/?username=' + encodeURIComponent(username),
+-    opts
++  // Instagram's legacy web_profile_info route is rate-limited even for valid
++  // sessions. The profile page embeds its numeric id and uses this GraphQL
++  // operation for the same data.
++  const bootstrap = Array.from(document.scripts)
++    .map((script) => script.textContent || '')
++    .find((text) => text.includes('"page_id":"profilePage_') && text.includes('"profile_id"')) || '';
++  const pk = normalizeInstagramUserId(
++    (bootstrap.match(/"profile_id":"(\\d+)"/) || [])[1],
++    'Instagram profile page returned no valid user id for: ' + username
+   );
+-  if (r1.status === 404) throw new Error('User not found: ' + username);
+-  if (!r1.ok && r1.status !== 400) throwInstagramHttpError(r1, 'Instagram web_profile_info');
+-  if (r1.ok) {
+-    const data = await readInstagramJson(r1, 'Instagram web_profile_info');
+-    const u = data?.data?.user;
+-    return [mapProfileUser(u, {
+-      followers: (user) => user.edge_followed_by?.count ?? 0,
+-      following: (user) => user.edge_follow?.count ?? 0,
+-      posts: (user) => user.edge_owner_to_timeline_media?.count ?? 0,
+-    })];
+-  }
+-  // web_profile_info answers HTTP 400 for business/professional accounts.
+-  // Resolve the id via feed-by-username (its root user.pk is the profile
+-  // owner), then read the full profile from users/<id>/info/.
+-  const r2 = await fetch(
+-    'https://www.instagram.com/api/v1/feed/user/' + encodeURIComponent(username) + '/username/?count=1',
+-    opts
+-  );
+-  if (!r2.ok) throwInstagramHttpError(r2, 'Instagram feed-by-username');
+-  const pk = normalizeInstagramUserId((await readInstagramJson(r2, 'Instagram feed-by-username'))?.user?.pk, 'Instagram feed returned no valid profile owner for: ' + username);
+-  const r3 = await fetch('https://www.instagram.com/api/v1/users/' + pk + '/info/', opts);
+-  if (!r3.ok) throwInstagramHttpError(r3, 'Instagram users info');
+-  const u = (await readInstagramJson(r3, 'Instagram users info'))?.user;
++  const actorId = (bootstrap.match(/"actorID":"(\\d+)"/) || [])[1] || '';
++  const csrf = (document.cookie.split('; ').find((cookie) => cookie.startsWith('csrftoken=')) || '').split('=')[1] || '';
++  const variables = {
++    enable_integrity_filters: true,
++    id: pk,
++    __relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider: true,
++    __relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider: false,
++    __relay_internal__pv__PolarisProfileInformTreatmentBannerEnabledrelayprovider: false,
++    __relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider: false,
++    __relay_internal__pv__PolarisProfileRingsGradientEnabledrelayprovider: true,
++    __relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider: true,
++    __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: true,
++  };
++  const body = new URLSearchParams({
++    av: actorId,
++    __d: 'www',
++    __user: '0',
++    __a: '1',
++    __req: '1',
++    __hs: '20748.HYP:instagram_web_pkg.2.1...0',
++    dpr: '1',
++    __ccg: 'EXCELLENT',
++    __rev: '1051302887',
++    __comet_req: '7',
++    fb_dtsg: typeof window.fb_dtsg === 'string' ? window.fb_dtsg : '',
++    jazoest: '26418',
++    lsd: '',
++    fb_api_caller_class: 'RelayModern',
++    fb_api_req_friendly_name: 'PolarisProfilePageContentQuery',
++    server_timestamps: 'true',
++    variables: JSON.stringify(variables),
++    doc_id: '28717443601247930',
++  });
++  const r = await fetch('/api/graphql', {
++    method: 'POST',
++    credentials: 'include',
++    headers: {
++      'Content-Type': 'application/x-www-form-urlencoded',
++      'X-CSRFToken': csrf,
++      'X-FB-Friendly-Name': 'PolarisProfilePageContentQuery',
++      'X-IG-App-ID': '936619743392459',
++      'X-ASBD-ID': '359341',
++    },
++    body: body.toString(),
++  });
++  if (!r.ok) throwInstagramHttpError(r, 'Instagram profile GraphQL');
++  const data = await readInstagramJson(r, 'Instagram profile GraphQL');
++  if (data.errors) throw new Error('Instagram profile GraphQL error: ' + JSON.stringify(data.errors));
++  const u = data?.data?.user;
+   return [mapProfileUser(u, {
+     followers: (user) => user.follower_count ?? 0,
+     following: (user) => user.following_count ?? 0,

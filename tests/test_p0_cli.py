@@ -1158,6 +1158,8 @@ def test_mcporter_install_uses_resolved_windows_command_paths(monkeypatch):
                 args,
                 stdout='{"servers": [{"name": "exa"}]}',
             )
+        if args == [mcporter_cmd, "daemon", "restart"]:
+            return _docker_result(args)
         return _docker_result(args, returncode=1)
 
     monkeypatch.setattr(shutil, "which", fake_which)
@@ -1167,6 +1169,7 @@ def test_mcporter_install_uses_resolved_windows_command_paths(monkeypatch):
     assert calls == [
         [npm_cmd, "install", "-g", "mcporter"],
         [mcporter_cmd, "config", "list", "--json"],
+        [mcporter_cmd, "daemon", "restart"],
     ]
 
 

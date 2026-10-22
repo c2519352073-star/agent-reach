@@ -1389,6 +1389,7 @@ def _install_mcporter():
             )
             if add_result.returncode == 0:
                 print("  ✅ Exa search configured (free, no API key needed)")
+                _restart_mcporter_daemon(mcporter_cmd)
                 return True
             else:
                 print(
@@ -1398,12 +1399,34 @@ def _install_mcporter():
                 return False
         else:
             print("  ✅ Exa search already configured")
+            _restart_mcporter_daemon(mcporter_cmd)
             return True
     except Exception:
         print("  [!]  Could not configure Exa. Run manually: mcporter config add exa https://mcp.exa.ai/mcp --scope home")
         return False
 
     # NOTE: xhs-cli is now optional, installed via --channels=xiaohongshu
+
+
+def _restart_mcporter_daemon(mcporter_cmd):
+    """Drop any cached failed MCP connection after configuring Exa."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [mcporter_cmd, "daemon", "restart"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode == 0:
+        print("  ✅ mcporter daemon restarted")
+        return True
+    print("  [!]  mcporter daemon could not be restarted")
+    return False
 
 
 def _install_mcporter_safe():
@@ -2259,7 +2282,8 @@ def _cmd_doctor(args=None):
     from agent_reach.config import Config
     from agent_reach.doctor import check_all, format_report
     config = Config(read_only=True)
-    results = check_all(config)
+    deep = bool(args is not None and getattr(args, "deep", False))
+    results = check_all(config, deep=True) if deep else check_all(config)
 
     if args is not None and getattr(args, "json", False):
         print(json.dumps(results, ensure_ascii=False, indent=2))

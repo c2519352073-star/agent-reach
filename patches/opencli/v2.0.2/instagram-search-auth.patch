@@ -1,0 +1,152 @@
+--- a/clis/instagram/search.js
++++ b/clis/instagram/search.js
+@@ -15,30 +15,86 @@
+     navigateBefore: false,
+     func: async (page, kwargs) => {
+-        await page.goto('https://www.instagram.com/');
++        await page.goto('https://www.instagram.com/explore/');
++        await page.wait(1);
+         return runInstagramRead(page, `(async () => {
+   const query = ${JSON.stringify(kwargs.query)};
+   const limit = ${JSON.stringify(kwargs.limit)};
+   ${readInstagramJsonJs()}
+-  const res = await fetch(
+-    'https://www.instagram.com/web/search/topsearch/?query=' + encodeURIComponent(query) + '&context=user',
+-    {
+-      credentials: 'include',
+-      headers: { 'X-IG-App-ID': '936619743392459' }
+-    }
+-  );
+-  if (!res.ok) throw new Error('Instagram search failed: HTTP ' + res.status);
+-  const data = await readInstagramJson(res, 'Instagram search');
+-  if (!Array.isArray(data.users)) throw new Error('Instagram search returned malformed users');
+-  const users = data.users.slice(0, limit);
+-  return users.map((item, i) => ({
+-    rank: i + 1,
+-    username: item.user?.username || '',
+-    name: item.user?.full_name || '',
+-    verified: item.user?.is_verified ? 'Yes' : 'No',
+-    private: item.user?.is_private ? 'Yes' : 'No',
+-    avatar_url: typeof item.user?.profile_pic_url === 'string' && item.user.profile_pic_url.startsWith('https://') ? item.user.profile_pic_url : '',
+-    url: 'https://www.instagram.com/' + (item.user?.username || ''),
+-  }));
++  const csrf = (document.cookie.split('; ').find((cookie) => cookie.startsWith('csrftoken=')) || '').split('=')[1] || '';
++  const dtsg = typeof window.fb_dtsg === 'string' ? window.fb_dtsg : '';
++  const sessionId = typeof crypto.randomUUID === 'function'
++    ? crypto.randomUUID()
++    : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
++  const body = new URLSearchParams({
++    av: '17841443890459940',
++    __d: 'www',
++    __user: '0',
++    __a: '1',
++    __req: 'i',
++    __hs: '20748.HYP:instagram_web_pkg.2.1...0',
++    dpr: '1',
++    __ccg: 'EXCELLENT',
++    __rev: '1051302887',
++    __s: '',
++    __hsi: '',
++    __dyn: '',
++    __csr: '',
++    __hsdp: '',
++    __hblp: '',
++    __sjsp: '',
++    __comet_req: '7',
++    fb_dtsg: dtsg,
++    jazoest: '26235',
++    lsd: '',
++    __spin_r: '1051302887',
++    __spin_b: 'trunk',
++    __spin_t: String(Math.floor(Date.now() / 1000)),
++    __crn: 'comet.igweb.PolarisExploreRoute',
++    fb_api_caller_class: 'RelayModern',
++    fb_api_req_friendly_name: 'PolarisSearchBoxRefetchableQuery',
++    server_timestamps: 'true',
++    variables: JSON.stringify({
++      data: {
++        context: 'blended',
++        include_reel: 'true',
++        query,
++        rank_token: '',
++        search_session_id: sessionId,
++        search_surface: 'web_top_search',
++      },
++      hasQuery: true,
++    }),
++    doc_id: '27706427925724183',
++  });
++  const res = await fetch('/api/graphql', {
++    method: 'POST',
++    credentials: 'include',
++    headers: {
++      'Content-Type': 'application/x-www-form-urlencoded',
++      'X-CSRFToken': csrf,
++      'X-FB-Friendly-Name': 'PolarisSearchBoxRefetchableQuery',
++      'X-IG-App-ID': '936619743392459',
++      'X-ASBD-ID': '359341',
++    },
++    body: body.toString(),
++  });
++  const data = await readInstagramJson(res, 'Instagram search');
++  if (data.errors) throw new Error('Instagram search GraphQL error: ' + JSON.stringify(data.errors));
++  const connection = data?.data?.xdt_api__v1__fbsearch__topsearch_connection;
++  if (!connection || !Array.isArray(connection.users)) throw new Error('Instagram search returned malformed users');
++  return connection.users.slice(0, limit).map((item, i) => {
++    const user = item.user || {};
++    const avatar = typeof user.profile_pic_url === 'string' && user.profile_pic_url.startsWith('https://') ? user.profile_pic_url : '';
++    return {
++      rank: i + 1,
++      username: user.username || '',
++      name: user.full_name || '',
++      verified: user.is_verified ? 'Yes' : 'No',
++      private: user.is_private ? 'Yes' : 'No',
++      avatar_url: avatar,
++      url: 'https://www.instagram.com/' + (user.username || ''),
++    };
++  });
+ })()
+ `);
+     },
+--- a/clis/instagram/auth.js
++++ b/clis/instagram/auth.js
+@@ -16,20 +16,18 @@
+     try {
+       const uid = (document.cookie.split('; ').find(c => c.startsWith('ds_user_id=')) || '').split('=')[1] || '';
+       if (!uid) return { kind: 'auth', detail: 'Instagram ds_user_id cookie missing' };
+-      const r = await fetch('/api/v1/users/' + uid + '/info/', {
+-        credentials: 'include',
+-        headers: { 'X-IG-App-ID': '936619743392459', 'Accept': 'application/json' },
+-      });
+-      if (r.status === 401 || r.status === 403) {
+-        return { kind: 'auth', detail: 'Instagram /users/info HTTP ' + r.status };
+-      }
+-      if (!r.ok) return { kind: 'http', httpStatus: r.status };
+-      const d = await r.json();
+-      const user = d?.user;
+-      if (!user || !user.pk) {
+-        return { kind: 'auth', detail: 'Instagram /users/info returned no pk — session likely expired' };
+-      }
+-      return { ok: true, user_id: String(user.pk), username: String(user.username || ''), full_name: String(user.full_name || '') };
++      const profileLink = Array.from(document.querySelectorAll('a[href^="/"]')).find((link) => {
++        const href = link.getAttribute('href') || '';
++        return /^\\/[^/?#]+\\/?$/.test(href) && link.querySelector('img[alt]');
++      });
++      if (!profileLink) {
++        return { kind: 'auth', detail: 'Instagram profile link not visible; session may need a page refresh' };
++      }
++      const username = String(profileLink.getAttribute('href') || '').replace(/^\\/|\\/$/g, '');
++      if (!username) {
++        return { kind: 'auth', detail: 'Instagram profile link has no username' };
++      }
++      return { ok: true, user_id: String(uid), username, full_name: '' };
+     } catch (e) {
+       return { kind: 'exception', detail: String(e && e.message || e) };
+     }
+@@ -36,6 +35,5 @@
+   })()`);
+   if (result?.kind === 'auth') throw new AuthRequiredError('www.instagram.com', result.detail);
+-  if (result?.kind === 'http') throw new CommandExecutionError(`HTTP ${result.httpStatus} from Instagram /users/info`);
+   if (result?.kind === 'exception') throw new CommandExecutionError(`Instagram whoami failed: ${result.detail}`);
+   if (!result?.ok) throw new CommandExecutionError(`Unexpected Instagram probe: ${JSON.stringify(result)}`);
+   return { user_id: result.user_id, username: result.username, full_name: result.full_name };

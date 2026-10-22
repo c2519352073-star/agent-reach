@@ -11,11 +11,13 @@ import pytest
 from agent_reach.backends import OpenCLIStatus
 from agent_reach.channels import get_all_channels, get_channel
 from agent_reach.channels.bilibili import BilibiliChannel
+from agent_reach.channels.exa_search import ExaSearchChannel
 from agent_reach.channels.facebook import FacebookChannel
 from agent_reach.channels.instagram import InstagramChannel
 from agent_reach.channels.v2ex import V2EXChannel
 from agent_reach.channels.xiaohongshu import XiaoHongShuChannel
 from agent_reach.channels.xueqiu import XueqiuChannel
+from agent_reach.probe import ProbeResult
 
 
 class TestChannelRegistry:
@@ -53,6 +55,37 @@ class TestOpenCLISiteChannels:
         assert ch.can_handle("https://instagram.com/p/abc123/")
         assert ch.can_handle("https://instagr.am/p/abc123/")
         assert not ch.can_handle("https://facebook.com/openai")
+
+    def test_instagram_deep_check_verifies_login(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent_reach.backends.opencli_status",
+            lambda: OpenCLIStatus(installed=True, extension_connected=True),
+        )
+        monkeypatch.setattr(
+            "agent_reach.channels.instagram.probe_command",
+            lambda *args, **kwargs: ProbeResult(
+                "ok",
+                output=json.dumps(
+                    {
+                        "ok": True,
+                        "data": [
+                            {
+                                "site": "instagram",
+                                "logged_in": True,
+                                "identity": "tester",
+                            }
+                        ],
+                    }
+                ),
+            ),
+        )
+
+        ch = InstagramChannel()
+        status, message = ch.check_live()
+
+        assert status == "ok"
+        assert "@tester" in message
+        assert ch.active_backend == "OpenCLI"
 
     def test_opencli_bridge_ready_is_unverified_for_login_platform(
         self, monkeypatch
@@ -990,8 +1023,8 @@ class TestXiaoHongShuChannel:
 
     def test_opencli_bridge_ready_is_unverified(self, monkeypatch):
         monkeypatch.setattr(
-            "agent_reach.backends.opencli_status",
-            lambda: OpenCLIStatus(
+            "agent_reach.backends.opencli_status_for",
+            lambda _config=None: OpenCLIStatus(
                 installed=True,
                 extension_connected=True,
                 version="1.8.6",
@@ -1303,8 +1336,8 @@ class TestBilibiliChannel:
 
     def test_opencli_bridge_ready_is_unverified(self, monkeypatch):
         monkeypatch.setattr(
-            "agent_reach.backends.opencli_status",
-            lambda: OpenCLIStatus(
+            "agent_reach.backends.opencli_status_for",
+            lambda _config=None: OpenCLIStatus(
                 installed=True,
                 extension_connected=True,
                 version="1.8.6",
@@ -1718,6 +1751,32 @@ class TestLinkedInChannel:
 
 
 class TestExaSearchChannel:
+    def test_deep_check_verifies_live_exa(self, monkeypatch):
+        ch = ExaSearchChannel()
+        monkeypatch.setattr(
+            ch,
+            "check",
+            lambda config=None: ("warn", "Exa 已配置；Doctor 未启动远端服务"),
+        )
+        monkeypatch.setattr(
+            "agent_reach.channels.exa_search.probe_command",
+            lambda *args, **kwargs: ProbeResult(
+                "ok",
+                output=json.dumps(
+                    {
+                        "status": "ok",
+                        "tools": [{"name": "web_search_exa"}],
+                    }
+                ),
+            ),
+        )
+
+        status, message = ch.check_live()
+
+        assert status == "ok"
+        assert "1 个工具" in message
+        assert ch.active_backend == "Exa via mcporter"
+
     def test_mcporter_is_never_executed(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/mcporter")

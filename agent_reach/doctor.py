@@ -16,7 +16,10 @@ from agent_reach.utils.text import scrub_url_credentials
 
 def _check_channel(ch, config, deep: bool):
     try:
-        checker = ch.check if deep else getattr(ch, "check_quick", ch.check)
+        if deep:
+            checker = getattr(ch, "check_live", ch.check)
+        else:
+            checker = getattr(ch, "check_quick", ch.check)
         status, message = checker(config)
         active = getattr(ch, "active_backend", None)
     except Exception as e:  # noqa: BLE001 — doctor must survive any channel

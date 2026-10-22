@@ -88,6 +88,14 @@ class TestCLI:
         assert "preserving existing files" not in out
         assert f"Skill installed for Agent: {skill_dir}" not in out
 
+    def test_doctor_deep_flag_reaches_check_all(self, capsys):
+        with patch("agent_reach.doctor.check_all", return_value={}) as check_all:
+            cli._cmd_doctor(Namespace(json=True, deep=True))
+
+        check_all.assert_called_once()
+        assert check_all.call_args.kwargs == {"deep": True}
+        assert capsys.readouterr().out.strip() == "{}"
+
     def test_transcribe_command_prints_text(self, capsys):
         with patch("agent_reach.transcribe.transcribe", return_value="hello transcript"):
             with patch("sys.argv", ["agent-reach", "transcribe", "audio.mp3"]):

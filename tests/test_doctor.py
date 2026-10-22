@@ -30,12 +30,36 @@ class _StubChannel:
         return self._status, self._message
 
 
+class _DeepStubChannel(_StubChannel):
+    def check_quick(self, config=None):
+        return "warn", "quick"
+
+    def check_live(self, config=None):
+        self.active_backend = "live"
+        return "ok", "live"
+
+
 @pytest.fixture
 def tmp_config(tmp_path):
     return Config(config_path=tmp_path / "config.yaml")
 
 
 class TestDoctor:
+    def test_deep_uses_live_checker(self, monkeypatch):
+        monkeypatch.setattr(
+            doctor,
+            "get_all_channels",
+            lambda: [_DeepStubChannel("instagram", "Instagram", 1, "off", "off")],
+        )
+
+        quick = doctor.check_all(config=None)
+        deep = doctor.check_all(config=None, deep=True)
+
+        assert quick["instagram"]["status"] == "warn"
+        assert quick["instagram"]["active_backend"] is None
+        assert deep["instagram"]["status"] == "ok"
+        assert deep["instagram"]["active_backend"] == "live"
+
     def test_check_all_collects_channel_results(self, tmp_config, monkeypatch):
         monkeypatch.setattr(
             doctor,

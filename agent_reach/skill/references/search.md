@@ -1,6 +1,6 @@
 # 搜索工具
 
-Exa AI 搜索引擎。
+Exa 是面向 AI Agent 的语义搜索服务，不是传统关键词搜索引擎。
 
 ## Exa AI 搜索
 
@@ -10,6 +10,21 @@ Exa AI 搜索引擎。
 mcporter call exa.web_search_exa query="query" numResults=5
 mcporter call exa.web_search_exa query="library API code example" numResults=5
 ```
+
+如果 `mcporter list` 显示 Exa `offline`，但端点
+`https://mcp.exa.ai/mcp` 可访问，先重启 mcporter 守护进程：
+
+```bash
+mcporter daemon restart
+mcporter list exa --json
+```
+
+`agent-reach doctor --deep --json` 会实际执行 `mcporter list exa --json` 并验证
+Exa MCP 连接；普通 `doctor` 只检查配置，不启动远端服务。
+
+不要把 Exa Authorization 写入仓库内的 `config/mcporter.json`。如果本地
+`config/mcporter.json` 声明了 `exa`，它会覆盖 `~/.mcporter/mcporter.json`；
+优先删除这个本地覆盖项，让带凭据的用户级配置生效。
 
 ### 使用场景
 

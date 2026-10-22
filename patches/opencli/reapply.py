@@ -119,6 +119,9 @@ def main() -> int:
         results.append((patch_path.name, apply_patch(package, patch_path)))
     for filename in (
         "clis/facebook/profile.js",
+        "clis/instagram/auth.js",
+        "clis/instagram/profile.js",
+        "clis/instagram/search.js",
         "clis/twitter/auth.js",
         "clis/xiaohongshu/search.js",
         "clis/xueqiu/hot.js",

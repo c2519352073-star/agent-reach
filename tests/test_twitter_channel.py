@@ -121,7 +121,7 @@ def test_nothing_installed_returns_install_hint():
 
 def test_opencli_bridge_ready_is_unverified_for_twitter():
     with patch(
-        "agent_reach.backends.opencli_status",
+        "agent_reach.backends.opencli_status_for",
         return_value=OpenCLIStatus(
             installed=True,
             extension_connected=True,
