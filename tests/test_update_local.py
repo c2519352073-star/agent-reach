@@ -25,6 +25,31 @@ def test_check_only_reports_update_without_merging(monkeypatch, tmp_path, capsys
     assert "agent-reach update-local" in output
 
 
+def test_fetch_status_creates_remote_tracking_ref(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_git(root, *args, check=True):
+        calls.append(args)
+        if args[0] == "fetch":
+            return ""
+        if args[:3] == ("rev-parse", "--short", "HEAD"):
+            return "abc123"
+        if args[:3] == ("rev-parse", "--short", "origin/main"):
+            return "def456"
+        if args[0] == "rev-list":
+            return "1"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(update_local, "_branch", lambda root: "codex/local")
+    monkeypatch.setattr(update_local, "_git", fake_git)
+
+    status = update_local._fetch_status(tmp_path)
+
+    assert ("fetch", "origin", "main:refs/remotes/origin/main") in calls
+    assert status.upstream == "def456"
+    assert status.behind == 1
+
+
 def test_merge_conflict_aborts_and_restores_branch(monkeypatch, tmp_path):
     status = update_local.UpdateStatus(
         root=tmp_path,

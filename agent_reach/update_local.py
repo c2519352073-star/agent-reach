@@ -86,7 +86,7 @@ def _check_opencli_patches(root: Path) -> None:
 
 
 def _fetch_status(root: Path) -> UpdateStatus:
-    _git(root, "fetch", "origin", "main")
+    _git(root, "fetch", "origin", "main:refs/remotes/origin/main")
     return UpdateStatus(
         root=root,
         branch=_branch(root),
