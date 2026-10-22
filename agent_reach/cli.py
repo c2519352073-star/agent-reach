@@ -174,6 +174,15 @@ def main():
     )
 
     sub.add_parser("check-update", help="Check for new versions and changes")
+    p_update_local = sub.add_parser(
+        "update-local",
+        help="Safely merge upstream changes into this editable checkout",
+    )
+    p_update_local.add_argument(
+        "--check",
+        action="store_true",
+        help="Fetch and report whether an update is available without merging",
+    )
 
     # ── watch ──
     sub.add_parser("watch", help="Quick health check + update check (for scheduled tasks)")
@@ -200,6 +209,8 @@ def main():
         _cmd_ensure_opencli(args)
     elif args.command == "check-update":
         _cmd_check_update()
+    elif args.command == "update-local":
+        _cmd_update_local(args)
     elif args.command == "watch":
         _cmd_watch()
     elif args.command == "setup":
@@ -397,6 +408,17 @@ def _cmd_install(args):
     else:
         print()
         print("Dry run complete. No changes were made.")
+
+
+def _cmd_update_local(args):
+    """Update the local editable checkout without replacing local fixes."""
+    from agent_reach.update_local import UpdateError, update_local
+
+    try:
+        return update_local(check_only=args.check)
+    except UpdateError as error:
+        print(f"[X] {error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 def _install_skill():
@@ -1914,13 +1936,11 @@ def _github_get_with_retry(
     return None, "unknown", retries
 
 
-#: Full update = package + upstream tools + skill. The one-liner walks an
-#: agent through all three (docs/update.md); bare pip only updates the package.
+#: Local editable checkout: preserve local patches by merging Git history.
 _UPDATE_INSTRUCTIONS = (
-    "更新方式（推荐，复制这句话给你的 AI Agent，会完整更新本体+上游工具+skill）：\n"
-    "  帮我更新 Agent Reach：https://raw.githubusercontent.com/Panniantong/agent-reach/main/docs/update.md\n"
-    "仅更新本体（不含上游工具和 skill）：\n"
-    "  pip install --upgrade https://github.com/Panniantong/agent-reach/archive/main.zip"
+    "本机使用 editable 本地源码，不要运行上游覆盖式更新。\n"
+    "  检查：agent-reach update-local --check\n"
+    "  更新：agent-reach update-local"
 )
 
 
@@ -2066,8 +2086,8 @@ def _cmd_watch():
         if release_body:
             for line in release_body.strip().split("\n")[:10]:
                 print(f"    {line}")
-        print("  更新（一句话发给 Agent 即可完整更新）：")
-        print("    帮我更新 Agent Reach：https://raw.githubusercontent.com/Panniantong/agent-reach/main/docs/update.md")
+        print("  更新本地修复分支：")
+        print("    agent-reach update-local")
 
 
 if __name__ == "__main__":

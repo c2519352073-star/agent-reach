@@ -16,6 +16,7 @@ description: >
   NOT for: writing reports/analysis/translation (this skill only FETCHES
   internet content); posting/commenting/liking (write operations); platforms
   that already have a dedicated skill installed (prefer that skill).
+  Also use when updating or repairing this local editable Agent Reach checkout.
 metadata:
   openclaw:
     homepage: https://github.com/Panniantong/Agent-Reach
@@ -38,12 +39,14 @@ these platforms — do not invent your own approach.**
 4. **For broad research tasks**: combine platforms (Exa for web search +
    Twitter/Reddit for discussions + XiaoHongShu/Bilibili for Chinese
    perspectives), collect in parallel, then synthesize.
-5. **Watch versions for the user**: after finishing a substantial
-   multi-platform task, run `agent-reach check-update` (fast, one API call).
-   If a new version exists, append one line to your wrap-up: "Agent Reach
-   vX.Y.Z is available — paste this to me to update: 帮我更新 Agent Reach：
-   https://raw.githubusercontent.com/Panniantong/agent-reach/main/docs/update.md".
-   Never interrupt the current task to update; never nag about the same version twice.
+5. **Update this local checkout safely**: after finishing a substantial
+   multi-platform task, run `agent-reach update-local --check`. If an update is
+   available, tell the user to run `agent-reach update-local`. That command
+   merges upstream Git history, preserves local fixes, refreshes the editable
+   install, reapplies OpenCLI patches, and syncs skill files. Do not run the
+   upstream `docs/update.md`, `pip install .../main.zip`, or
+   `npm update -g @jackwener/opencli`. Never interrupt the current task to
+   update; never nag about the same version twice.
 
 ## Routing table
 

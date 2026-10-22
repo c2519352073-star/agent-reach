@@ -183,6 +183,13 @@ class TestCLI:
         assert calls[0][1]["env"]["PYTHONUTF8"] == "1"
         assert calls[0][1]["env"]["PYTHONIOENCODING"] == "utf-8"
 
+    def test_update_local_dispatches_safe_update(self):
+        with patch("agent_reach.update_local.update_local", return_value=0) as update:
+            with patch("sys.argv", ["agent-reach", "update-local", "--check"]):
+                main()
+
+        update.assert_called_once_with(check_only=True)
+
     def test_parse_twitter_cookie_input_separate_values(self):
         auth_token, ct0 = cli._parse_twitter_cookie_input("token123 ct0abc")
         assert auth_token == "token123"
