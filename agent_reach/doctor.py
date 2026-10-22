@@ -7,8 +7,11 @@ Each channel knows how to check itself. Doctor just collects the results.
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 
-from agent_reach.config import Config
+from rich.markup import escape
+
 from agent_reach.channels import get_all_channels
+from agent_reach.config import Config
+from agent_reach.utils.text import scrub_url_credentials
 
 
 def _check_channel(ch, config, deep: bool):
@@ -23,7 +26,7 @@ def _check_channel(ch, config, deep: bool):
     return ch.name, {
         "status": status,
         "name": ch.description,
-        "message": message,
+        "message": scrub_url_credentials(message),
         "tier": ch.tier,
         "backends": ch.backends,
         "active_backend": active,
@@ -41,16 +44,14 @@ def check_all(config: Config, *, deep: bool = False, max_workers: int = 6) -> Di
         return {}
 
     # OpenCLI serves several channels. Probe it once so parallel workers can
-    # share the result instead of spawning two subprocesses per channel.
-    shared_opencli = None
+    # share the result instead of spawning multiple subprocesses per channel.
     if config is not None and any("OpenCLI" in getattr(ch, "backends", []) for ch in channels):
         try:
             from agent_reach.backends.opencli import opencli_status
 
-            shared_opencli = opencli_status()
-            setattr(config, "_doctor_opencli_status", shared_opencli)
+            setattr(config, "_doctor_opencli_status", opencli_status())
         except Exception:
-            shared_opencli = None
+            pass
 
     workers = max(1, min(int(max_workers or 1), len(channels)))
     try:
@@ -80,11 +81,6 @@ def _name_msg(r: dict, escape) -> str:
 
 def format_report(results: Dict[str, dict]) -> str:
     """Format results as a readable text report (with Rich markup)."""
-    try:
-        from rich.markup import escape
-    except ImportError:
-        escape = lambda x: x
-
     lines = []
     lines.append("[bold cyan]Agent Reach 状态[/bold cyan]")
     lines.append("[cyan]" + "=" * 40 + "[/cyan]")
@@ -141,7 +137,6 @@ def format_report(results: Dict[str, dict]) -> str:
         )
 
     # Security check: config file permissions (Unix only)
-    import os
     import stat
     import sys
 

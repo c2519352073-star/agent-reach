@@ -3,6 +3,7 @@
 
 import http.cookiejar
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -48,6 +49,8 @@ def _run_opencli_json(*args: str) -> Any:
     executable = shutil.which("opencli")
     if not executable:
         raise RuntimeError("opencli 未安装")
+    env = os.environ.copy()
+    env.pop("OPENCLI_DAEMON_PORT", None)
     proc = subprocess.run(
         [executable, "xueqiu", *args, "-f", "json"],
         capture_output=True,
@@ -55,6 +58,7 @@ def _run_opencli_json(*args: str) -> Any:
         encoding="utf-8",
         errors="replace",
         timeout=60,
+        env=env,
     )
     try:
         payload = json.loads(proc.stdout)
@@ -91,6 +95,9 @@ def _opencli_quote(item: dict, symbol: str) -> dict:
         "market_capital": item.get("marketCap"),
         "turnover_rate": item.get("turnover_rate"),
         "pe_ttm": None,
+        "pe_forecast": None,
+        "pb": None,
+        "eps": None,
         "timestamp": item.get("time"),
     }
 
@@ -131,12 +138,12 @@ def _inject_cookie_string(cookie_str: str) -> None:
         _cookie_jar.set_cookie(cookie)
 
 
-def _load_cookies_from_config() -> bool:
+def _load_cookies_from_config(config=None) -> bool:
     """Try to load Xueqiu cookies from agent-reach config file (xueqiu_cookie key)."""
     try:
         from ..config import Config
 
-        cfg = Config()
+        cfg = config if config is not None else Config(read_only=True)
         cookie_str = cfg.get("xueqiu_cookie")
         if not cookie_str:
             return False
@@ -146,50 +153,18 @@ def _load_cookies_from_config() -> bool:
         return False
 
 
-def _load_cookies_from_browser() -> bool:
-    """Try to silently load Xueqiu cookies from the local Chrome browser.
-
-    Only succeeds when browser_cookie3 is installed AND the user is logged in
-    (xq_a_token present).  Failures are silently ignored so that agents without
-    a local browser keep working.
-    """
-    try:
-        try:
-            import rookiepy
-            cookies = rookiepy.chrome([".xueqiu.com"])
-            if not any(c.get("name") == "xq_a_token" for c in cookies):
-                return False
-            for c in cookies:
-                _cookie_jar.set(c["name"], c["value"], domain=c.get("domain", ".xueqiu.com"))
-            return True
-        except ImportError:
-            import browser_cookie3
-            cookies = list(browser_cookie3.chrome(domain_name=".xueqiu.com"))
-            if not any(c.name == "xq_a_token" for c in cookies):
-                return False
-            for c in cookies:
-                _cookie_jar.set_cookie(c)
-            return True
-    except Exception:
-        return False
-
-
-def _ensure_cookies() -> None:
-    """Populate session cookies using the best available source.
+def _ensure_cookies(config=None) -> None:
+    """Populate session cookies without touching browser credential stores.
 
     Priority order:
     1. Saved cookie string in ~/.agent-reach/config.yaml  (set by configure --from-browser)
-    2. Live Chrome browser cookies via rookiepy/browser_cookie3 (if installed + logged in)
-    3. Homepage visit fallback                             (only yields anti-DDoS acw_tc,
-                                                           not enough for stock APIs)
+    2. Homepage visit fallback (only yields public session cookies and may not
+       be sufficient when Xueqiu requires a logged-in session)
     """
     global _cookies_initialized
     if _cookies_initialized:
         return
-    if _load_cookies_from_config():
-        _cookies_initialized = True
-        return
-    if _load_cookies_from_browser():
+    if _load_cookies_from_config(config):
         _cookies_initialized = True
         return
     # Fallback: visit homepage to pick up acw_tc anti-DDoS cookie.
@@ -200,9 +175,9 @@ def _ensure_cookies() -> None:
     _cookies_initialized = True
 
 
-def _get_json(url: str) -> Any:
+def _get_json(url: str, config=None) -> Any:
     """Fetch *url* with Xueqiu session cookies and return parsed JSON."""
-    _ensure_cookies()
+    _ensure_cookies(config)
     req = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Referer": _REFERER}
     )
@@ -229,8 +204,9 @@ class XueqiuChannel(Channel):
     # ------------------------------------------------------------------ #
 
     def can_handle(self, url: str) -> bool:
-        d = urllib.parse.urlparse(url).netloc.lower()
-        return "xueqiu.com" in d
+        from agent_reach.utils.url import host_matches
+
+        return host_matches(url, "xueqiu.com")
 
     # ------------------------------------------------------------------ #
     # Health check
@@ -238,7 +214,23 @@ class XueqiuChannel(Channel):
 
     def check(self, config=None):
         self.active_backend = None
-        opencli_error = None
+        api_error = None
+        try:
+            data = _get_json(
+                "https://stock.xueqiu.com/v5/stock/quote.json"
+                "?symbol=SH601138&extend=detail",
+                config,
+            )
+            quote = (data.get("data") or {}).get("quote") or {}
+            if quote:
+                self.active_backend = _API_BACKEND
+                return "ok", "公开 API 可用（行情、搜索、热帖、热股）"
+            api_error = "API 响应异常（返回数据为空）"
+        except Exception as error:
+            from agent_reach.utils.text import scrub_url_credentials
+
+            api_error = scrub_url_credentials(error).rstrip(": ")
+
         try:
             items = _run_opencli_json("stock", "SH000001")
             if items:
@@ -247,28 +239,17 @@ class XueqiuChannel(Channel):
                     "OpenCLI 可用（公开行情与浏览器页面）。用法："
                     "opencli xueqiu stock/search/hot/hot-stock -f json"
                 )
-        except Exception as e:
-            opencli_error = e
+        except Exception as opencli_error:
+            from agent_reach.utils.text import scrub_url_credentials
 
-        try:
-            data = _get_json(
-                "https://stock.xueqiu.com/v5/stock/batch/quote.json?symbol=SH000001"
-            )
-            items = (data.get("data") or {}).get("items") or []
-            if items:
-                self.active_backend = _API_BACKEND
-                return "ok", "公开 API 可用（行情、搜索、热股）；热帖需 OpenCLI"
-            return "warn", "API 响应异常（返回数据为空）"
-        except Exception as e:
-            if opencli_error is not None:
-                return "warn", (
-                    f"OpenCLI 连接失败：{opencli_error}；"
-                    f"Xueqiu API 连接失败：{e}"
-                )
+            opencli_detail = scrub_url_credentials(opencli_error).rstrip(": ")
             return "warn", (
-                f"Xueqiu API 连接失败：{e}。"
-                "请先登录雪球后运行：agent-reach configure --from-browser chrome"
+                f"Xueqiu 连接失败：OpenCLI：{opencli_detail}；API：{api_error}。"
+                "如需登录 Cookie，请运行：agent-reach configure "
+                "--from-browser chrome --platform xueqiu；"
+                "doctor 不会自动读取浏览器 Cookie。"
             )
+        return "warn", f"Xueqiu API 响应异常：{api_error}"
 
     def check_quick(self, config=None):
         """Avoid launching a full Xueqiu page/API probe in the default doctor."""
@@ -279,8 +260,7 @@ class XueqiuChannel(Channel):
         if status.installed and not status.broken and status.ready:
             self.active_backend = _OPENCLI_BACKEND
             return "ok", (
-                "OpenCLI 已安装并连接（复用浏览器登录态）；实时行情由 "
-                "doctor --deep 验证"
+                "OpenCLI 已安装并连接；实时行情由 doctor --deep 验证"
             )
         if config is not None and config.get("xueqiu_cookie"):
             self.active_backend = _API_BACKEND
@@ -299,7 +279,8 @@ class XueqiuChannel(Channel):
 
         Returns a dict with keys:
           symbol, name, current, percent, chg, high, low, open, last_close,
-          volume, amount, market_capital, turnover_rate, pe_ttm, timestamp
+          volume, amount, market_capital, turnover_rate, pe_ttm, pe_forecast,
+          pb, eps, timestamp
         """
         opencli_error = None
         if self.active_backend != _API_BACKEND:
@@ -307,15 +288,16 @@ class XueqiuChannel(Channel):
                 items = _run_opencli_json("stock", symbol)
                 if items:
                     return _opencli_quote(items[0], symbol)
-            except Exception as e:
-                opencli_error = e
+            except Exception as error:
+                opencli_error = error
 
+        encoded_symbol = urllib.parse.quote(symbol, safe="")
         try:
             data = _get_json(
-                f"https://stock.xueqiu.com/v5/stock/batch/quote.json?symbol={symbol}"
+                "https://stock.xueqiu.com/v5/stock/quote.json"
+                f"?symbol={encoded_symbol}&extend=detail"
             )
-            items = (data.get("data") or {}).get("items") or []
-            q = (items[0].get("quote") or {}) if items else {}
+            q = (data.get("data") or {}).get("quote") or {}
             return {
                 "symbol": q.get("symbol", symbol),
                 "name": q.get("name", ""),
@@ -331,6 +313,9 @@ class XueqiuChannel(Channel):
                 "market_capital": q.get("market_capital"),
                 "turnover_rate": q.get("turnover_rate"),
                 "pe_ttm": q.get("pe_ttm"),
+                "pe_forecast": q.get("pe_forecast"),
+                "pb": q.get("pb"),
+                "eps": q.get("eps"),
                 "timestamp": q.get("timestamp"),
             }
         except Exception as api_error:
@@ -362,22 +347,22 @@ class XueqiuChannel(Channel):
                     }
                     for item in items[:limit]
                 ]
-            except Exception as e:
-                opencli_error = e
+            except Exception as error:
+                opencli_error = error
 
         try:
             data = _get_json(
-                f"https://www.xueqiu.com/query/v1/search/web/stock.json"
-                f"?q={urllib.parse.quote(query)}&size={limit}&page=1"
+                f"https://xueqiu.com/stock/search.json"
+                f"?code={urllib.parse.quote(query)}&size={limit}"
             )
-            stocks = data.get("list") or data.get("stocks") or []
+            stocks = data.get("stocks") or []
             results = []
-            for s in stocks[:limit]:
+            for stock in stocks[:limit]:
                 results.append(
                     {
-                        "symbol": s.get("code", ""),
-                        "name": s.get("name", ""),
-                        "exchange": s.get("exchange", ""),
+                        "symbol": stock.get("code", ""),
+                        "name": stock.get("name", ""),
+                        "exchange": stock.get("exchange", ""),
                     }
                 )
             return results
@@ -401,6 +386,11 @@ class XueqiuChannel(Channel):
         Returns a list of dicts with keys:
           id, title, text, author, likes, url
         """
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        limit = min(limit, 50)
+        if limit == 0:
+            return []
         opencli_error = None
         if self.active_backend != _API_BACKEND:
             try:
@@ -416,13 +406,13 @@ class XueqiuChannel(Channel):
                     }
                     for item in items[:limit]
                 ]
-            except Exception as e:
-                opencli_error = e
+            except Exception as error:
+                opencli_error = error
 
         try:
             data = _get_json(
-            "https://xueqiu.com/v4/statuses/public_timeline_by_category.json"
-            "?since_id=-1&max_id=-1&count=20&category=-1"
+                "https://xueqiu.com/v4/statuses/public_timeline_by_category.json"
+                f"?since_id=-1&max_id=-1&count={limit}&category=-1"
             )
             items = data.get("list") or []
             results = []
@@ -479,29 +469,18 @@ class XueqiuChannel(Channel):
                     "--type",
                     str(stock_type),
                 )
-                results = []
-                for item in items[:limit]:
-                    percent = item.get("changePercent")
-                    try:
-                        percent = (
-                            float(str(percent).rstrip("%"))
-                            if percent is not None
-                            else None
-                        )
-                    except ValueError:
-                        percent = None
-                    results.append(
-                        {
-                            "symbol": item.get("symbol", ""),
-                            "name": item.get("name", ""),
-                            "current": item.get("price"),
-                            "percent": percent,
-                            "rank": item.get("rank", 0),
-                        }
-                    )
-                return results
-            except Exception as e:
-                opencli_error = e
+                return [
+                    {
+                        "symbol": item.get("symbol", ""),
+                        "name": item.get("name", ""),
+                        "current": item.get("current"),
+                        "percent": item.get("percent"),
+                        "rank": item.get("rank", index),
+                    }
+                    for index, item in enumerate(items[:limit], 1)
+                ]
+            except Exception as error:
+                opencli_error = error
 
         try:
             data = _get_json(
@@ -510,14 +489,14 @@ class XueqiuChannel(Channel):
             )
             items = (data.get("data") or {}).get("items") or []
             results = []
-            for idx, item in enumerate(items[:limit], 1):
+            for index, item in enumerate(items[:limit], 1):
                 results.append(
                     {
                         "symbol": item.get("code") or item.get("symbol", ""),
                         "name": item.get("name", ""),
                         "current": item.get("current"),
                         "percent": item.get("percent"),
-                        "rank": idx,
+                        "rank": index,
                     }
                 )
             return results

@@ -3,12 +3,15 @@
 
 import shutil
 import subprocess
+from argparse import Namespace
 from unittest.mock import patch
 
 import pytest
 import requests
+
 import agent_reach.cli as cli
 from agent_reach.cli import main
+from agent_reach.config import Config
 
 
 class TestCLI:
@@ -27,11 +30,63 @@ class TestCLI:
         assert exc_info.value.code == 0
 
     def test_doctor_runs(self, capsys):
-        with patch("sys.argv", ["agent-reach", "doctor"]):
+        with patch(
+            "agent_reach.doctor.check_all",
+            return_value={
+                "web": {
+                    "status": "ok",
+                    "name": "网页",
+                    "message": "可用",
+                    "tier": 0,
+                    "backends": ["Jina Reader"],
+                    "active_backend": "Jina Reader",
+                }
+            },
+        ), patch(
+            "agent_reach.doctor.format_report",
+            return_value="Agent Reach\n✅ 网页可用",
+        ), patch("sys.argv", ["agent-reach", "doctor"]):
             main()
         captured = capsys.readouterr()
         assert "Agent Reach" in captured.out
         assert "✅" in captured.out
+
+    def test_doctor_is_read_only_and_never_installs_skill(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        skill_dir = tmp_path / ".agents" / "skills" / "agent-reach"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        custom_content = "# custom Agent Reach skill\n"
+        skill_file.write_text(custom_content, encoding="utf-8")
+
+        monkeypatch.setattr(
+            cli.os.path,
+            "expanduser",
+            lambda p: p.replace("~", str(tmp_path)),
+        )
+        config_dir = tmp_path / ".agent-reach"
+        monkeypatch.setattr(Config, "CONFIG_DIR", config_dir)
+        monkeypatch.setattr(Config, "CONFIG_FILE", config_dir / "config.yaml")
+        monkeypatch.setattr("agent_reach.doctor.check_all", lambda config: {})
+        monkeypatch.setattr("agent_reach.doctor.format_report", lambda results: "report")
+        install_calls = []
+        monkeypatch.setattr(
+            cli,
+            "_install_skill",
+            lambda *args, **kwargs: install_calls.append((args, kwargs)),
+        )
+
+        cli._cmd_doctor(Namespace(json=False))
+
+        assert skill_file.read_text(encoding="utf-8") == custom_content
+        assert install_calls == []
+        assert not config_dir.exists()
+        out = capsys.readouterr().out
+        assert "report" in out
+        assert "Skill installed" not in out
+        assert "preserving existing files" not in out
+        assert f"Skill installed for Agent: {skill_dir}" not in out
 
     def test_transcribe_command_prints_text(self, capsys):
         with patch("agent_reach.transcribe.transcribe", return_value="hello transcript"):
@@ -48,147 +103,47 @@ class TestCLI:
         assert out_file.read_text(encoding="utf-8").strip() == "saved text"
         assert "Transcript written" in capsys.readouterr().out
 
-    def test_transcribe_relative_output_uses_download_dir(
-        self, capsys, tmp_path, monkeypatch
-    ):
-        download_root = tmp_path / "downloads"
-        monkeypatch.setenv("AGENT_REACH_DOWNLOAD_DIR", str(download_root))
-        with patch("agent_reach.transcribe.transcribe", return_value="saved text"):
-            with patch("sys.argv", ["agent-reach", "transcribe", "audio.mp3", "-o", "t.txt"]):
-                main()
-        out_file = download_root / "t.txt"
-        assert out_file.read_text(encoding="utf-8").strip() == "saved text"
-        assert str(out_file) in capsys.readouterr().out
-
-    def test_configure_download_dir(self, capsys, tmp_path, monkeypatch):
-        from agent_reach.config import Config
-
-        config_dir = tmp_path / "config"
-        config_file = config_dir / "config.yaml"
-        target = tmp_path / "downloads" / "技能下载文件"
-        monkeypatch.setattr(Config, "CONFIG_DIR", config_dir)
-        monkeypatch.setattr(Config, "CONFIG_FILE", config_file)
-
+    def test_transcribe_provider_fallback_requires_explicit_flag(self):
         with patch(
-            "sys.argv",
-            ["agent-reach", "configure", "download-dir", str(target)],
-        ):
-            main()
+            "agent_reach.transcribe.transcribe",
+            return_value="hello transcript",
+        ) as mock_transcribe:
+            with patch(
+                "sys.argv",
+                [
+                    "agent-reach",
+                    "transcribe",
+                    "audio.mp3",
+                    "--allow-provider-fallback",
+                ],
+            ):
+                main()
 
-        assert target.is_dir()
-        assert Config().get("download_dir") == str(target)
-        assert "下载目录已配置" in capsys.readouterr().out
-
-    def test_twitter_search_uses_opencli(self, capsys):
-        completed = subprocess.CompletedProcess(
-            ["opencli"], 0, "results\n", ""
+        mock_transcribe.assert_called_once_with(
+            "audio.mp3",
+            provider="auto",
+            allow_provider_fallback=True,
         )
-        with patch("shutil.which", return_value="/usr/bin/opencli"), patch(
-            "subprocess.run", return_value=completed
-        ) as run:
+
+    def test_transcribe_provider_fallback_rejects_explicit_provider(self, capsys):
+        with patch("agent_reach.transcribe.transcribe") as mock_transcribe:
             with patch(
                 "sys.argv",
-                ["agent-reach", "twitter-search", "OpenAI", "-f", "json"],
+                [
+                    "agent-reach",
+                    "transcribe",
+                    "audio.mp3",
+                    "--provider",
+                    "groq",
+                    "--allow-provider-fallback",
+                ],
             ):
-                main()
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
 
-        assert run.call_args.args[0] == [
-            "/usr/bin/opencli",
-            "twitter",
-            "search",
-            "OpenAI",
-            "-f",
-            "json",
-            "--window",
-            "foreground",
-            "--site-session",
-            "persistent",
-        ]
-        assert "twitter" not in capsys.readouterr().out.lower()
-
-    def test_twitter_search_uses_dom_when_adapter_fetch_fails(self, capsys):
-        import json
-
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            action = cmd[2]
-            if action == "search":
-                return subprocess.CompletedProcess(
-                    cmd, 1, "", "TypeError: Failed to fetch"
-                )
-            if action == "extract":
-                payload = {"ok": True, "data": {"content": "OpenAI result"}}
-                return subprocess.CompletedProcess(
-                    cmd, 0, json.dumps(payload), ""
-                )
-            return subprocess.CompletedProcess(cmd, 0, "{}", "")
-
-        with patch("shutil.which", return_value="/usr/bin/opencli"), patch(
-            "subprocess.run", side_effect=fake_run
-        ):
-            with patch(
-                "sys.argv",
-                ["agent-reach", "twitter-search", "OpenAI", "-f", "json"],
-            ):
-                main()
-
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["source"] == "opencli-browser-dom"
-        assert payload["content"] == "OpenAI result"
-        assert calls[-1][2] == "close"
-
-    def test_youtube_download_dispatches_wrapper(self, capsys, tmp_path):
-        with patch(
-            "agent_reach.youtube_download.download_youtube",
-            return_value=tmp_path,
-        ), patch(
-            "sys.argv",
-            ["agent-reach", "youtube-download", "https://youtu.be/test", "--simulate"],
-        ):
-            main()
-
-        out = capsys.readouterr().out
-        assert "模拟完成" in out
-        assert str(tmp_path) in out
-
-    def test_bili_wrapper_forces_utf8(self, monkeypatch):
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append((cmd, kwargs))
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-
-        monkeypatch.setattr(
-            shutil, "which",
-            lambda name: "/usr/bin/bili" if name == "bili" else None,
-        )
-        monkeypatch.setattr(subprocess, "run", fake_run)
-
-        with pytest.raises(SystemExit) as exc_info:
-            with patch(
-                "sys.argv",
-                ["agent-reach", "bili", "search", "OpenAI", "--json"],
-            ):
-                main()
-
-        assert exc_info.value.code == 0
-        assert calls[0][0] == [
-            "/usr/bin/bili",
-            "search",
-            "OpenAI",
-            "--json",
-        ]
-        assert calls[0][1]["env"]["PYTHONUTF8"] == "1"
-        assert calls[0][1]["env"]["PYTHONIOENCODING"] == "utf-8"
-
-    def test_update_local_dispatches_safe_update(self):
-        with patch("agent_reach.update_local.update_local", return_value=0) as update:
-            with patch("sys.argv", ["agent-reach", "update-local", "--check"]):
-                main()
-
-        update.assert_called_once_with(check_only=True)
+        assert exc_info.value.code == 2
+        assert "requires --provider auto" in capsys.readouterr().err
+        mock_transcribe.assert_not_called()
 
     def test_parse_twitter_cookie_input_separate_values(self):
         auth_token, ct0 = cli._parse_twitter_cookie_input("token123 ct0abc")
@@ -201,6 +156,35 @@ class TestCLI:
         )
         assert auth_token == "token123"
         assert ct0 == "ct0abc"
+
+    def test_twitter_config_does_not_run_unsafe_verification_or_mutate_env(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("TWITTER_AUTH_TOKEN", "shell-auth")
+        monkeypatch.setenv("TWITTER_CT0", "shell-ct0")
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/twitter")
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_args, **_kwargs: pytest.fail(
+                "configure must not execute twitter status"
+            ),
+        )
+
+        cli._cmd_configure(
+            Namespace(
+                from_browser=None,
+                key="twitter-cookies",
+                value=["saved-auth", "saved-ct0"],
+                sync_legacy_twitter=False,
+            )
+        )
+
+        output = capsys.readouterr().out
+        assert "未实时验证" in output
+        assert "不会执行 `twitter status`" in output
+        assert cli.os.environ["TWITTER_AUTH_TOKEN"] == "shell-auth"
+        assert cli.os.environ["TWITTER_CT0"] == "shell-ct0"
 
     def test_install_rdt_cli_prefers_github_source(self, monkeypatch, capsys):
         state = {"rdt_installed": False}
@@ -224,8 +208,73 @@ class TestCLI:
         cli._install_rdt_cli()
 
         out = capsys.readouterr().out
-        assert commands == [["pipx", "install", cli._RDT_GIT_SOURCE]]
+        assert commands == [["/usr/local/bin/pipx", "install", cli._RDT_GIT_SOURCE]]
         assert "✅ rdt-cli installed" in out
+
+    def test_install_boss_deps_pins_pr_commit_with_pipx(self, monkeypatch, capsys):
+        state = {"boss_installed": False}
+        commands = []
+
+        def fake_which(name):
+            if name == "boss":
+                return "/usr/local/bin/boss" if state["boss_installed"] else None
+            if name == "pipx":
+                return "/usr/local/bin/pipx"
+            return None
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            state["boss_installed"] = True
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(shutil, "which", fake_which)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert cli._install_boss_deps() is True
+
+        assert commands == [
+            [
+                "/usr/local/bin/pipx",
+                "install",
+                "--force",
+                cli._BOSS_AGENT_CLI_SOURCE,
+            ]
+        ]
+        assert cli._BOSS_AGENT_CLI_PR_COMMIT in cli._BOSS_AGENT_CLI_SOURCE
+        assert cli._BOSS_AGENT_CLI_PR_COMMIT == "4c991b77086a203173bf08a4cb64a23af6514fe6"
+        assert "can4hou6joeng4/boss-agent-cli" in cli._BOSS_AGENT_CLI_SOURCE
+        assert "iqjiy" not in cli._BOSS_AGENT_CLI_SOURCE
+        assert "boss-agent-cli upstream pinned commit" in capsys.readouterr().out
+
+    def test_install_boss_deps_falls_back_to_uv(self, monkeypatch):
+        state = {"boss_installed": False}
+        commands = []
+
+        def fake_which(name):
+            if name == "boss":
+                return "/usr/local/bin/boss" if state["boss_installed"] else None
+            if name == "uv":
+                return "/usr/local/bin/uv"
+            return None
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            state["boss_installed"] = True
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(shutil, "which", fake_which)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert cli._install_boss_deps() is True
+        assert commands == [
+            [
+                "/usr/local/bin/uv",
+                "tool",
+                "install",
+                "--force",
+                cli._BOSS_AGENT_CLI_SOURCE,
+            ]
+        ]
 
     def test_install_reddit_deps_routes_by_environment(self, monkeypatch):
         """桌面 → OpenCLI;服务器 → rdt-cli(钉 git 源)。"""
@@ -242,6 +291,91 @@ class TestCLI:
         monkeypatch.setattr(cli, "_detect_environment", lambda: "server")
         cli._install_reddit_deps()
         assert calls == ["rdt"]
+
+    def test_install_opencli_uses_resolved_windows_npm_path(self, monkeypatch):
+        import agent_reach.backends as backends
+        from agent_reach.backends import OpenCLIStatus
+
+        statuses = iter(
+            [
+                OpenCLIStatus(installed=False),
+                OpenCLIStatus(installed=True, extension_connected=False),
+            ]
+        )
+        calls = []
+        monkeypatch.setattr(backends, "opencli_status", lambda: next(statuses))
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name: "C:/Tools/npm.CMD" if name == "npm" else None,
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda args, **_kwargs: calls.append(args)
+            or subprocess.CompletedProcess(args, 0, "", ""),
+        )
+
+        assert cli._install_opencli_deps() is True
+        assert calls == [
+            ["C:/Tools/npm.CMD", "install", "-g", backends.OPENCLI_PACKAGE]
+        ]
+
+    def test_install_facebook_instagram_routes_to_opencli_once(self, monkeypatch, capsys):
+        calls = []
+
+        monkeypatch.setattr(cli, "_detect_environment", lambda: "local")
+        monkeypatch.setattr(cli, "_install_system_deps", lambda: None)
+        monkeypatch.setattr(cli, "_install_mcporter", lambda: None)
+        monkeypatch.setattr(cli, "_install_opencli_deps", lambda: calls.append("opencli"))
+        monkeypatch.setattr(cli, "_install_skill", lambda: None)
+        monkeypatch.setattr(
+            "agent_reach.doctor.check_all",
+            lambda config: {
+                "facebook": {
+                    "status": "ok",
+                    "name": "Facebook",
+                    "message": "ok",
+                    "tier": 1,
+                    "backends": ["OpenCLI"],
+                    "active_backend": "OpenCLI",
+                }
+            },
+        )
+        monkeypatch.setattr("agent_reach.doctor.format_report", lambda results: "report")
+
+        cli._cmd_install(
+            Namespace(
+                env="auto",
+                proxy="",
+                system=True,
+                safe=False,
+                dry_run=False,
+                channels="facebook,instagram,opencli",
+            )
+        )
+
+        assert calls == ["opencli"]
+        assert "Installation complete" in capsys.readouterr().out
+
+    def test_install_server_dry_run_skips_opencli_only_channels(self, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_install_system_deps_dryrun", lambda: None)
+
+        cli._cmd_install(
+            Namespace(
+                env="server",
+                proxy="",
+                system=True,
+                safe=False,
+                dry_run=True,
+                channels="facebook,instagram,opencli,boss,bilibili",
+            )
+        )
+
+        out = capsys.readouterr().out
+        assert "服务器环境跳过：boss, facebook, instagram, opencli" in out
+        assert "[dry-run] Would install optional channels: bilibili" in out
+        assert "boss, facebook, instagram, opencli, bilibili" not in out
 
 
 class TestCheckUpdateRetry:

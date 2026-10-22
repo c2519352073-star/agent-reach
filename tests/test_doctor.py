@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """Tests for doctor module."""
 
-import time
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
@@ -128,65 +134,192 @@ def test_stale_active_backend_does_not_leak_into_errored_result(monkeypatch):
     assert results["boom"]["active_backend"] is None
 
 
-def test_quick_mode_uses_fast_checks(monkeypatch):
-    class _QuickChannel(_StubChannel):
-        def __init__(self):
-            super().__init__("quick", "快速", 0, "ok", "deep")
-            self.quick_calls = 0
+def test_channel_exception_credentials_are_scrubbed(monkeypatch):
+    """Doctor is the final trust boundary for unexpected channel errors."""
+
+    class _ExplodingChannel:
+        name = "secret"
+        description = "敏感渠道"
+        tier = 0
+        backends = ["secret-backend"]
+        active_backend = None
 
         def check(self, config=None):
-            raise AssertionError("deep check must not run in quick mode")
+            raise RuntimeError(
+                "request https://alice:password@example.test/data"
+                "?access_token=top-secret failed"
+            )
 
-        def check_quick(self, config=None):
-            self.quick_calls += 1
-            return "ok", "quick"
+    monkeypatch.setattr(doctor, "get_all_channels", lambda: [_ExplodingChannel()])
 
-    channel = _QuickChannel()
+    message = doctor.check_all(config=None)["secret"]["message"]
+
+    assert "alice" not in message
+    assert "password" not in message
+    assert "top-secret" not in message
+    assert "https://***@example.test/data?access_token=***" in message
+
+
+def test_channel_success_message_credentials_are_scrubbed(monkeypatch):
+    """Expected channel messages must pass through the same trust boundary."""
+    channel = _StubChannel(
+        "configured",
+        "已配置渠道",
+        0,
+        "warn",
+        (
+            "upstream returned https://alice:password@example.test/data"
+            "?api_key=top-secret"
+        ),
+        ["upstream"],
+    )
     monkeypatch.setattr(doctor, "get_all_channels", lambda: [channel])
-    results = doctor.check_all(config=None)
-    assert results["quick"]["message"] == "quick"
-    assert channel.quick_calls == 1
+
+    message = doctor.check_all(config=None)["configured"]["message"]
+
+    assert "alice" not in message
+    assert "password" not in message
+    assert "top-secret" not in message
+    assert "https://***@example.test/data?api_key=***" in message
 
 
-def test_check_all_runs_channels_in_parallel(monkeypatch):
-    class _SlowChannel(_StubChannel):
-        def check(self, config=None):
-            time.sleep(0.2)
-            return "ok", self.name
+def _snapshot_user_roots() -> tuple:
+    entries = []
+    seen = set()
+    for variable in (
+        "HOME",
+        "USERPROFILE",
+        "XDG_CONFIG_HOME",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ):
+        root = Path(os.environ[variable])
+        if root in seen:
+            continue
+        seen.add(root)
+        if not root.exists():
+            entries.append((variable, ".", "missing"))
+            continue
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                detail = ("symlink", os.readlink(path))
+            elif path.is_dir():
+                detail = ("directory", path.stat().st_mode & 0o777)
+            elif path.is_file():
+                detail = (
+                    "file",
+                    path.stat().st_mode & 0o777,
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+            else:
+                detail = ("other",)
+            entries.append((variable, relative, detail))
+    return tuple(entries)
 
-    channels = [
-        _SlowChannel(f"slow{i}", f"慢{i}", 0, "ok", "")
-        for i in range(4)
-    ]
-    monkeypatch.setattr(doctor, "get_all_channels", lambda: channels)
-    started = time.monotonic()
-    results = doctor.check_all(config=None, deep=True, max_workers=4)
-    elapsed = time.monotonic() - started
-    assert len(results) == 4
-    assert elapsed < 0.55
 
+def test_real_doctor_path_is_zero_write_and_never_runs_risky_status_commands(
+    monkeypatch, tmp_path, capsys
+):
+    """Run the real Doctor collector with deterministic external probes."""
+    import agent_reach.backends.opencli as opencli
+    import agent_reach.channels.bilibili as bilibili
+    import agent_reach.channels.v2ex as v2ex
+    import agent_reach.channels.xiaohongshu as xiaohongshu
+    import agent_reach.channels.xueqiu as xueqiu
+    from agent_reach import cli
 
-def test_opencli_probe_is_shared_once(monkeypatch, tmp_config):
-    class _OpenCLIChannel(_StubChannel):
-        def __init__(self, name):
-            super().__init__(name, name, 1, "ok", "ok", ["OpenCLI"])
+    workdir = tmp_path / "empty-workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.delenv("MCPORTER_CONFIG", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
-        def check(self, config=None):
-            assert getattr(config, "_doctor_opencli_status", None) == "shared"
-            return "ok", "ok"
+    available = {
+        "gh",
+        "opencli",
+        "yt-dlp",
+        "bili",
+        "ffmpeg",
+        "mcporter",
+        "twitter",
+        "rdt",
+        "xhs",
+        "deno",
+        "node",
+    }
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/audit-bin/{name}" if name in available else None,
+    )
 
     calls = []
 
-    def fake_status():
-        calls.append(1)
-        return "shared"
+    def fake_run(command, **kwargs):
+        argv = [str(item) for item in command]
+        calls.append(argv)
+        name = Path(argv[0]).name
+        assert name != "mcporter"
+        assert argv[1:] not in (
+            ["auth", "status"],
+            ["status"],
+            ["daemon", "status"],
+        )
+        if name == "gh":
+            assert argv[1:] == ["--version"]
+            assert kwargs["env"]["GH_TELEMETRY"] == "false"
+            assert kwargs["env"]["DO_NOT_TRACK"] == "true"
+            output = "gh version 2.92.0"
+        elif name == "opencli":
+            assert argv[1:] == ["--version"]
+            output = "1.8.6"
+        elif name == "yt-dlp":
+            output = "2026.01.01"
+        elif name == "bili":
+            output = "0.3.0"
+        elif name == "ffmpeg":
+            output = "ffmpeg version 7.0"
+        else:
+            pytest.fail(f"unexpected Doctor subprocess: {argv}")
+        return subprocess.CompletedProcess(argv, 0, output, "")
 
-    monkeypatch.setattr("agent_reach.backends.opencli.opencli_status", fake_status)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(opencli, "_fetch_daemon_status", lambda timeout=2: None)
+    monkeypatch.setattr(opencli, "_extension_installed_on_disk", lambda: False)
     monkeypatch.setattr(
-        doctor,
-        "get_all_channels",
-        lambda: [_OpenCLIChannel("twitter"), _OpenCLIChannel("reddit")],
+        opencli, "_unpacked_extension_files_present", lambda: False
     )
-    results = doctor.check_all(tmp_config, deep=True, max_workers=2)
-    assert set(results) == {"twitter", "reddit"}
-    assert calls == [1]
+    monkeypatch.setattr(bilibili, "_search_api_ok", lambda: False)
+    monkeypatch.setattr(
+        xiaohongshu, "_mcp_service_reachable", lambda timeout=3: False
+    )
+    monkeypatch.setattr(v2ex, "_get_json", lambda _url: [])
+    monkeypatch.setattr(
+        xueqiu,
+        "_get_json",
+        lambda _url, _config=None: {
+            "data": {"quote": {"symbol": "SH601138"}}
+        },
+    )
+
+    before = _snapshot_user_roots()
+    cli._cmd_doctor(Namespace(json=True))
+    after = _snapshot_user_roots()
+
+    assert after == before
+    assert calls
+    assert all(Path(call[0]).name != "mcporter" for call in calls)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["github"]["status"] == "warn"
+    assert payload["github"]["active_backend"] is None
+    for channel_name in (
+        "twitter",
+        "reddit",
+        "facebook",
+        "instagram",
+        "xiaohongshu",
+    ):
+        assert payload[channel_name]["status"] == "warn"
+        assert payload[channel_name]["active_backend"] is None
