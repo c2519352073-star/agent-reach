@@ -82,7 +82,7 @@ def main():
     p_conf.add_argument("key", nargs="?", default=None,
                         choices=["proxy", "github-token", "groq-key", "openai-key",
                                  "twitter-cookies", "youtube-cookies",
-                                 "xhs-cookies"],
+                                 "xhs-cookies", "download-dir"],
                         help="What to configure (omit if using --from-browser)")
     p_conf.add_argument("value", nargs="*", help="The value(s) to set")
     p_conf.add_argument("--from-browser", metavar="BROWSER",
@@ -93,6 +93,22 @@ def main():
     p_doctor = sub.add_parser("doctor", help="Check platform availability")
     p_doctor.add_argument("--json", action="store_true",
                           help="Output machine-readable JSON instead of the text report")
+    p_doctor.add_argument("--deep", action="store_true",
+                          help="Run live functional probes (slower)")
+    p_doctor.add_argument("--wake", action="store_true",
+                          help="Start the matching Chrome profile if OpenCLI is disconnected")
+    p_doctor.add_argument("--timeout", type=int, default=15,
+                          help="Seconds to wait for OpenCLI when using --wake (default: 15)")
+    p_doctor.add_argument("--workers", type=int, default=6,
+                          help="Maximum parallel channel checks (default: 6)")
+
+    # ── OpenCLI browser ──
+    p_ensure = sub.add_parser("ensure-opencli",
+                              help="Wake Chrome/OpenCLI and wait for the Browser Bridge")
+    p_ensure.add_argument("--json", action="store_true",
+                          help="Output machine-readable JSON")
+    p_ensure.add_argument("--timeout", type=int, default=15,
+                          help="Seconds to wait for Chrome/OpenCLI (default: 15)")
 
     # ── uninstall ──
     p_uninstall = sub.add_parser("uninstall", help="Remove all Agent Reach config, tokens, and skill files")
@@ -122,6 +138,41 @@ def main():
     p_tr.add_argument("-o", "--output", default=None,
                       help="Write transcript to a file instead of stdout")
 
+    # ── stable platform commands ──
+    p_twitter = sub.add_parser(
+        "twitter-search",
+        help="Search Twitter/X through OpenCLI only (twitter-cli search is unsupported)",
+    )
+    p_twitter.add_argument("query", help="Search query")
+    p_twitter.add_argument("-f", "--format", choices=["yaml", "json"], default="yaml",
+                           help="Output format (default: yaml)")
+
+    p_youtube = sub.add_parser(
+        "youtube-download",
+        help="Download YouTube through Cookie + EJS + PO Token",
+    )
+    p_youtube.add_argument("url", help="YouTube video URL")
+    p_youtube.add_argument("--quality", type=int, default=720,
+                           help="Maximum video height (default: 720)")
+    p_youtube.add_argument("--output-dir", default=None,
+                           help="Output directory (default: Agent Reach download root)")
+    p_youtube.add_argument("--cookies-from-browser", default=None,
+                           help='yt-dlp cookie source (default: config or chrome:Profile 2)')
+    p_youtube.add_argument("--no-cookies", action="store_true",
+                           help="Attempt without browser cookies (bot checks may block it)")
+    p_youtube.add_argument("--simulate", action="store_true",
+                           help="Resolve metadata/formats without downloading")
+
+    p_bili = sub.add_parser(
+        "bili",
+        help="Run bili-cli with UTF-8 subprocess output",
+    )
+    p_bili.add_argument(
+        "bili_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments passed to bili-cli (use -- before a leading option)",
+    )
+
     sub.add_parser("check-update", help="Check for new versions and changes")
 
     # ── watch ──
@@ -145,6 +196,8 @@ def main():
 
     if args.command == "doctor":
         _cmd_doctor(args)
+    elif args.command == "ensure-opencli":
+        _cmd_ensure_opencli(args)
     elif args.command == "check-update":
         _cmd_check_update()
     elif args.command == "watch":
@@ -163,6 +216,12 @@ def main():
         _cmd_format(args)
     elif args.command == "transcribe":
         _cmd_transcribe(args)
+    elif args.command == "twitter-search":
+        _cmd_twitter_search(args)
+    elif args.command == "youtube-download":
+        _cmd_youtube_download(args)
+    elif args.command == "bili":
+        _cmd_bili(args)
 
 
 # ── Command handlers ────────────────────────────────
@@ -1047,6 +1106,14 @@ def _cmd_configure(args):
         print("✅ 代理已保存（供 Agent 在访问 Reddit/Twitter 等需要代理的网络时设置 HTTP_PROXY/HTTPS_PROXY）")
         print("  Note: B站走 bili-cli，国内网络无需代理。")
 
+    elif args.key == "download-dir":
+        from pathlib import Path
+
+        root = Path(os.path.expandvars(os.path.expanduser(value)))
+        root.mkdir(parents=True, exist_ok=True)
+        config.set("download_dir", str(root))
+        print(f"✅ 下载目录已配置：{root}")
+
     elif args.key == "twitter-cookies":
         # Accept two formats:
         # 1. auth_token ct0 (two separate values)
@@ -1067,7 +1134,6 @@ def _cmd_configure(args):
                 if not twitter_bin:
                     print("[!] twitter-cli not installed. Run: pipx install twitter-cli")
                 else:
-                    import os
                     env = os.environ.copy()
                     env["TWITTER_AUTH_TOKEN"] = auth_token
                     env["TWITTER_CT0"] = ct0
@@ -1114,7 +1180,9 @@ def _cmd_transcribe(args):
     """Transcribe a URL or local audio file via Whisper (Groq → OpenAI fallback)."""
     from pathlib import Path
 
+    from agent_reach.config import Config
     from agent_reach.transcribe import TranscribeError, transcribe
+    from agent_reach.utils.paths import get_agent_reach_download_dir
 
     try:
         text = transcribe(args.source, provider=args.provider)
@@ -1123,10 +1191,157 @@ def _cmd_transcribe(args):
         sys.exit(1)
 
     if args.output:
-        Path(args.output).write_text(text + "\n", encoding="utf-8")
-        print(f"✅ Transcript written to {args.output}")
+        output = Path(args.output).expanduser()
+        if not output.is_absolute():
+            output = get_agent_reach_download_dir(Config()) / output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text + "\n", encoding="utf-8")
+        print(f"✅ Transcript written to {output}")
     else:
         print(text)
+
+
+def _cmd_twitter_search(args):
+    """Search Twitter/X exclusively through OpenCLI."""
+    import json
+    import os
+    import shutil
+    import subprocess
+    from urllib.parse import quote_plus
+
+    import yaml
+
+    opencli = shutil.which("opencli")
+    if not opencli:
+        print("❌ opencli 未安装。运行 agent-reach install --channels opencli")
+        sys.exit(1)
+    cmd = [
+        opencli,
+        "twitter",
+        "search",
+        args.query,
+        "-f",
+        args.format,
+        "--window",
+        "foreground",
+        "--site-session",
+        "persistent",
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    if proc.returncode == 0:
+        sys.stdout.write(proc.stdout or "")
+        sys.stderr.write(proc.stderr or "")
+        return
+
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    if "Failed to fetch" not in combined and "TypeError" not in combined:
+        sys.stdout.write(proc.stdout or "")
+        sys.stderr.write(proc.stderr or "")
+        print("❌ OpenCLI Twitter 搜索失败；运行 agent-reach ensure-opencli 后重试")
+        sys.exit(proc.returncode)
+
+    # x.com's adapter fetches occasionally fail inside the page while the
+    # search timeline itself still renders. Use the browser page as a read-only
+    # fallback instead of falling back to the broken twitter-cli search.
+    session = f"twitter-search-{os.getpid()}"
+    search_url = (
+        "https://x.com/search?q="
+        f"{quote_plus(args.query)}&src=typed_query&f=live"
+    )
+
+    def run_opencli(extra):
+        return subprocess.run(
+            [opencli, *extra],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+
+    try:
+        opened = run_opencli(
+            ["browser", "open", search_url, "--session", session, "--window", "foreground"]
+        )
+        if opened.returncode:
+            raise RuntimeError(opened.stderr or opened.stdout or "browser open failed")
+        waited = run_opencli(["browser", "wait", "time", "8", "--session", session])
+        if waited.returncode:
+            raise RuntimeError(waited.stderr or waited.stdout or "browser wait failed")
+        extracted = run_opencli(["browser", "extract", "--session", session])
+        if extracted.returncode:
+            raise RuntimeError(
+                extracted.stderr or extracted.stdout or "browser extract failed"
+            )
+        data = json.loads(extracted.stdout)
+        content = (data.get("data") or {}).get("content", "")
+        if not content.strip():
+            raise RuntimeError("browser extract returned empty content")
+    except (RuntimeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+        print(f"❌ OpenCLI Twitter adapter 和 DOM 兜底都失败：{exc}")
+        sys.exit(1)
+    finally:
+        run_opencli(["browser", "close", "--session", session])
+
+    print("⚠ OpenCLI adapter fetch 失败，已改用浏览器搜索页提取。", file=sys.stderr)
+    payload = {
+        "ok": True,
+        "source": "opencli-browser-dom",
+        "query": args.query,
+        "url": search_url,
+        "content": content,
+    }
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
+
+
+def _cmd_youtube_download(args):
+    """Download a YouTube video with the verified Cookie/EJS/PO Token flags."""
+    from pathlib import Path
+
+    from agent_reach.youtube_download import YouTubeDownloadError, download_youtube
+
+    try:
+        output_dir = download_youtube(
+            args.url,
+            quality=args.quality,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            cookie_source=args.cookies_from_browser,
+            no_cookies=args.no_cookies,
+            simulate=args.simulate,
+        )
+    except YouTubeDownloadError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
+
+    action = "模拟完成" if args.simulate else "下载完成"
+    print(f"✅ YouTube {action}：{output_dir}")
+
+
+def _cmd_bili(args):
+    """Run bili-cli with UTF-8 forced for correct Windows output."""
+    import shutil
+    import subprocess
+
+    from agent_reach.utils.process import utf8_subprocess_env
+
+    binary = shutil.which("bili")
+    if not binary:
+        print("❌ bili-cli 未安装。运行 agent-reach install --channels bilibili")
+        sys.exit(127)
+
+    proc = subprocess.run(
+        [binary, *args.bili_args],
+        env=utf8_subprocess_env(),
+    )
+    sys.exit(proc.returncode)
 
 
 def _parse_twitter_cookie_input(value: str):
@@ -1452,7 +1667,15 @@ def _cmd_doctor(args=None):
     except ImportError:
         rprint = print
     config = Config()
-    results = check_all(config)
+    if args is not None and getattr(args, "wake", False):
+        from agent_reach.backends.opencli import ensure_opencli_ready
+
+        ensure_opencli_ready(timeout=getattr(args, "timeout", 15))
+    results = check_all(
+        config,
+        deep=bool(getattr(args, "deep", False)),
+        max_workers=int(getattr(args, "workers", 6)),
+    )
 
     if args is not None and getattr(args, "json", False):
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -1462,6 +1685,31 @@ def _cmd_doctor(args=None):
 
     # Auto-install skill if not already present (fixes #154)
     _install_skill()
+
+
+def _cmd_ensure_opencli(args):
+    from agent_reach.backends.opencli import ensure_opencli_ready, opencli_summary
+
+    status = ensure_opencli_ready(timeout=max(1, int(args.timeout)))
+    connected = bool(status.extension_connected)
+    if args.json:
+        print(json.dumps({
+            "ok": connected,
+            "installed": status.installed,
+            "broken": status.broken,
+            "daemon_running": status.daemon_running,
+            "extension_connected": status.extension_connected,
+            "extension_installed": status.extension_installed,
+            "version": status.version,
+            "message": opencli_summary(status),
+            "hint": status.hint,
+        }, ensure_ascii=False))
+    else:
+        print(opencli_summary(status))
+        if status.hint:
+            print(status.hint)
+    if not connected:
+        sys.exit(1)
 
 
 def _cmd_setup():
@@ -1613,13 +1861,34 @@ def _classify_github_response_error(resp):
     return None
 
 
-def _github_get_with_retry(url, timeout=10, retries=3, sleeper=time.sleep):
+def _github_auth_headers():
+    """Build GitHub API headers, using the configured token when available."""
+    from agent_reach.config import Config
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "agent-reach",
+    }
+    token = Config().get("github_token")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_get_with_retry(
+    url,
+    timeout=10,
+    retries=3,
+    sleeper=time.sleep,
+    headers=None,
+):
     """GET GitHub API with retry/backoff and basic error classification."""
     import requests
 
+    request_headers = dict(headers) if headers is not None else _github_auth_headers()
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(url, timeout=timeout)
+            resp = requests.get(url, timeout=timeout, headers=request_headers)
         except requests.exceptions.RequestException as exc:
             if attempt >= retries:
                 return None, _classify_update_error(exc), attempt

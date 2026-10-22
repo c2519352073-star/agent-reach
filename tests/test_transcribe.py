@@ -38,6 +38,30 @@ class FakeResponse:
         return 200 <= self.status_code < 300
 
 
+# --- yt-dlp download routing ------------------------------------------ #
+
+
+def test_download_audio_keeps_ytdlp_cache_with_output(monkeypatch, tmp_path):
+    out_dir = tmp_path / "downloads"
+    out_dir.mkdir()
+    captured = {}
+
+    monkeypatch.setattr(tr.shutil, "which", lambda binary: "yt-dlp")
+
+    def fake_run(cmd, timeout=600):
+        captured["cmd"] = cmd
+        (out_dir / "source.m4a").write_bytes(b"fake-audio")
+
+    monkeypatch.setattr(tr, "_run", fake_run)
+
+    result = tr.download_audio("https://example.test/video", out_dir)
+
+    cache_dir = out_dir / ".cache" / "yt-dlp"
+    assert result == out_dir / "source.m4a"
+    assert captured["cmd"][1:3] == ["--cache-dir", str(cache_dir)]
+    assert cache_dir.is_dir()
+
+
 # --- transcribe_chunk: provider routing -------------------------------- #
 
 
@@ -219,6 +243,34 @@ class TestOrchestrator:
     def test_no_provider_configured_fails_fast(self, fake_config, chunk_file):
         with pytest.raises(tr.NoProviderConfigured):
             tr.transcribe(str(chunk_file), config=fake_config)
+
+    def test_default_work_dir_uses_download_root(
+        self, monkeypatch, fake_config, tmp_path, chunk_file
+    ):
+        fake_config.set("groq_api_key", "gsk_test")
+        download_root = tmp_path / "downloads"
+        captured = {}
+
+        def fake_compress(src, out_dir):
+            captured["work_dir"] = out_dir
+            compressed = out_dir / "compressed.m4a"
+            compressed.write_bytes(b"x" * 1024)
+            return compressed
+
+        monkeypatch.setattr(
+            tr, "get_agent_reach_download_dir", lambda config: download_root
+        )
+        monkeypatch.setattr(tr, "compress_audio", fake_compress)
+        monkeypatch.setattr(
+            tr.requests,
+            "post",
+            lambda *a, **k: FakeResponse(200, "transcript text"),
+        )
+
+        text = tr.transcribe(str(chunk_file), config=fake_config)
+
+        assert text == "transcript text"
+        assert captured["work_dir"].parent == download_root
 
     def test_invalid_provider_string(self, fake_config, chunk_file):
         with pytest.raises(tr.TranscribeError, match="unknown provider"):

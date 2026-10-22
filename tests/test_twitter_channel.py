@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch
 
 from agent_reach.channels.twitter import TwitterChannel
 
@@ -25,7 +25,7 @@ def test_check_twitter_cli_found_and_auth_ok():
         status, message = channel.check()
     assert status == "ok"
     assert "twitter-cli" in message
-    assert "完整可用" in message
+    assert "登录可用" in message
     assert channel.active_backend == "twitter-cli"
 
 
@@ -169,6 +169,24 @@ def test_unauthenticated_twitter_cli_does_not_block_working_opencli():
     assert channel.active_backend == "OpenCLI"
 
 
+def test_opencli_preferred_over_twitter_cli_when_both_ready():
+    """Searching is reliable through OpenCLI, so it wins on desktop."""
+    channel = TwitterChannel()
+    with patch.object(
+        TwitterChannel,
+        "_check_opencli",
+        return_value=("ok", "OpenCLI 可用"),
+    ), patch.object(
+        TwitterChannel,
+        "_check_twitter_cli",
+        return_value=("ok", "twitter-cli 登录可用"),
+    ) as twitter_check, patch.object(TwitterChannel, "_check_bird", return_value=None):
+        status, _ = channel.check()
+    assert status == "ok"
+    assert channel.active_backend == "OpenCLI"
+    twitter_check.assert_not_called()
+
+
 def test_all_warn_falls_back_to_first_warn():
     channel = TwitterChannel()
     with patch.object(
@@ -180,5 +198,5 @@ def test_all_warn_falls_back_to_first_warn():
     ), patch.object(TwitterChannel, "_check_bird", return_value=None):
         status, msg = channel.check()
     assert status == "warn"
-    assert channel.active_backend == "twitter-cli"
-    assert "未认证" in msg
+    assert channel.active_backend == "OpenCLI"
+    assert "扩展未连接" in msg

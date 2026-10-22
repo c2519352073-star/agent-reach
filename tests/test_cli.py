@@ -48,6 +48,141 @@ class TestCLI:
         assert out_file.read_text(encoding="utf-8").strip() == "saved text"
         assert "Transcript written" in capsys.readouterr().out
 
+    def test_transcribe_relative_output_uses_download_dir(
+        self, capsys, tmp_path, monkeypatch
+    ):
+        download_root = tmp_path / "downloads"
+        monkeypatch.setenv("AGENT_REACH_DOWNLOAD_DIR", str(download_root))
+        with patch("agent_reach.transcribe.transcribe", return_value="saved text"):
+            with patch("sys.argv", ["agent-reach", "transcribe", "audio.mp3", "-o", "t.txt"]):
+                main()
+        out_file = download_root / "t.txt"
+        assert out_file.read_text(encoding="utf-8").strip() == "saved text"
+        assert str(out_file) in capsys.readouterr().out
+
+    def test_configure_download_dir(self, capsys, tmp_path, monkeypatch):
+        from agent_reach.config import Config
+
+        config_dir = tmp_path / "config"
+        config_file = config_dir / "config.yaml"
+        target = tmp_path / "downloads" / "技能下载文件"
+        monkeypatch.setattr(Config, "CONFIG_DIR", config_dir)
+        monkeypatch.setattr(Config, "CONFIG_FILE", config_file)
+
+        with patch(
+            "sys.argv",
+            ["agent-reach", "configure", "download-dir", str(target)],
+        ):
+            main()
+
+        assert target.is_dir()
+        assert Config().get("download_dir") == str(target)
+        assert "下载目录已配置" in capsys.readouterr().out
+
+    def test_twitter_search_uses_opencli(self, capsys):
+        completed = subprocess.CompletedProcess(
+            ["opencli"], 0, "results\n", ""
+        )
+        with patch("shutil.which", return_value="/usr/bin/opencli"), patch(
+            "subprocess.run", return_value=completed
+        ) as run:
+            with patch(
+                "sys.argv",
+                ["agent-reach", "twitter-search", "OpenAI", "-f", "json"],
+            ):
+                main()
+
+        assert run.call_args.args[0] == [
+            "/usr/bin/opencli",
+            "twitter",
+            "search",
+            "OpenAI",
+            "-f",
+            "json",
+            "--window",
+            "foreground",
+            "--site-session",
+            "persistent",
+        ]
+        assert "twitter" not in capsys.readouterr().out.lower()
+
+    def test_twitter_search_uses_dom_when_adapter_fetch_fails(self, capsys):
+        import json
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            action = cmd[2]
+            if action == "search":
+                return subprocess.CompletedProcess(
+                    cmd, 1, "", "TypeError: Failed to fetch"
+                )
+            if action == "extract":
+                payload = {"ok": True, "data": {"content": "OpenAI result"}}
+                return subprocess.CompletedProcess(
+                    cmd, 0, json.dumps(payload), ""
+                )
+            return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+        with patch("shutil.which", return_value="/usr/bin/opencli"), patch(
+            "subprocess.run", side_effect=fake_run
+        ):
+            with patch(
+                "sys.argv",
+                ["agent-reach", "twitter-search", "OpenAI", "-f", "json"],
+            ):
+                main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["source"] == "opencli-browser-dom"
+        assert payload["content"] == "OpenAI result"
+        assert calls[-1][2] == "close"
+
+    def test_youtube_download_dispatches_wrapper(self, capsys, tmp_path):
+        with patch(
+            "agent_reach.youtube_download.download_youtube",
+            return_value=tmp_path,
+        ), patch(
+            "sys.argv",
+            ["agent-reach", "youtube-download", "https://youtu.be/test", "--simulate"],
+        ):
+            main()
+
+        out = capsys.readouterr().out
+        assert "模拟完成" in out
+        assert str(tmp_path) in out
+
+    def test_bili_wrapper_forces_utf8(self, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(
+            shutil, "which",
+            lambda name: "/usr/bin/bili" if name == "bili" else None,
+        )
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(SystemExit) as exc_info:
+            with patch(
+                "sys.argv",
+                ["agent-reach", "bili", "search", "OpenAI", "--json"],
+            ):
+                main()
+
+        assert exc_info.value.code == 0
+        assert calls[0][0] == [
+            "/usr/bin/bili",
+            "search",
+            "OpenAI",
+            "--json",
+        ]
+        assert calls[0][1]["env"]["PYTHONUTF8"] == "1"
+        assert calls[0][1]["env"]["PYTHONIOENCODING"] == "utf-8"
+
     def test_parse_twitter_cookie_input_separate_values(self):
         auth_token, ct0 = cli._parse_twitter_cookie_input("token123 ct0abc")
         assert auth_token == "token123"
@@ -103,6 +238,44 @@ class TestCLI:
 
 
 class TestCheckUpdateRetry:
+    def test_auto_headers_use_configured_github_token(self, monkeypatch):
+        class FakeConfig:
+            def get(self, key):
+                return "ghp_test" if key == "github_token" else None
+
+        monkeypatch.setattr("agent_reach.config.Config", FakeConfig)
+        headers = cli._github_auth_headers()
+        assert headers["Authorization"] == "Bearer ghp_test"
+        assert headers["Accept"] == "application/vnd.github+json"
+
+    def test_retry_uses_auto_github_headers(self, monkeypatch):
+        captured = {}
+
+        class R:
+            status_code = 200
+            headers = {}
+
+        def fake_get(url, timeout, headers):
+            captured.update({"url": url, "timeout": timeout, "headers": headers})
+            return R()
+
+        monkeypatch.setattr(
+            cli,
+            "_github_auth_headers",
+            lambda: {"Authorization": "Bearer ghp_test"},
+        )
+        with patch("requests.get", side_effect=fake_get):
+            resp, err, attempts = cli._github_get_with_retry(
+                "https://api.github.com/test",
+                timeout=1,
+                retries=1,
+            )
+
+        assert err is None
+        assert resp.status_code == 200
+        assert attempts == 1
+        assert captured["headers"]["Authorization"] == "Bearer ghp_test"
+
     def test_retry_timeout_classification(self):
         sleeps = []
 

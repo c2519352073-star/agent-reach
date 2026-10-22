@@ -62,7 +62,7 @@ AI Agent 已经能帮你写代码、改文档、管项目——但你让它去�
 | 🔒 **隐私安全** | Cookie 只存在你本地，不上传不外传。代码完全开源，随时可审查 |
 | 🔄 **持续换代** | 每个平台都是「首选 + 备选」多后端路由。某个接入方式失效了，我们换下一个，你无感（2026-06 实例：yt-dlp 被 B站风控封死 → 已切换 bili-cli，用户零操作） |
 | 🤖 **兼容所有 Agent** | Claude Code、OpenClaw、Cursor、Windsurf……任何能跑命令行的 Agent 都能用 |
-| 🩺 **自带诊断** | `agent-reach doctor` 一条命令告诉你哪个通、哪个不通、怎么修 |
+| 🩺 **自带诊断** | `agent-reach doctor` 默认快速体检；`--deep` 做真实网络测试；`ensure-opencli` 自动恢复 Chrome 连接 |
 
 ---
 
@@ -75,8 +75,8 @@ AI Agent 已经能帮你写代码、改文档、管项目——但你让它去�
 | 📡 **RSS** | 阅读任意 RSS/Atom 源 | — | 无需配置 |
 | 🔍 **全网搜索** | — | 全网语义搜索 | 自动配置（MCP 接入，免费无需 Key） |
 | 📦 **GitHub** | 读公开仓库 + 搜索 | 私有仓库、提 Issue/PR、Fork | 告诉 Agent「帮我登录 GitHub」 |
-| 🐦 **Twitter/X** | 读单条推文 | 搜索推文、浏览时间线、读长文 | 告诉 Agent「帮我配 Twitter」 |
-| 📺 **B站** | 搜索 + 视频详情（bili-cli，无需登录） | 字幕（OpenCLI） | 告诉 Agent「帮我配 B站」 |
+| 🐦 **Twitter/X** | 读单条推文 | 搜索推文、浏览时间线、读长文 | 桌面搜索优先 OpenCLI；twitter-cli 0.8.5 搜索受上游故障影响 |
+| 📺 **B站** | 搜索 + 视频详情（bili-cli，无需登录） | 字幕（OpenCLI + B站登录） | 告诉 Agent「帮我配 B站」 |
 | 📖 **Reddit** | —（没有零配置路径：匿名接口已被封） | 搜索 + 读帖子和评论 | 桌面装 OpenCLI 用浏览器登录态；或 rdt-cli + Cookie |
 | 📕 **小红书** | — | 搜索、阅读、评论 | 桌面装 OpenCLI（刷过小红书即可用）；服务器用 xiaohongshu-mcp 扫码 |
 | 💼 **LinkedIn** | Jina Reader 读公开页面 | Profile 详情、公司页面、职位搜索 | 告诉 Agent「帮我配 LinkedIn」 |
@@ -134,7 +134,9 @@ AI Agent 已经能帮你写代码、改文档、管项目——但你让它去�
 5. **注册 SKILL.md** — 在 Agent 的 skills 目录安装使用指南，以后 Agent 遇到"全网调研"、"搜推特"、"看视频"这类需求，会自动知道该调哪个上游工具
 6. **问你要不要更多** — 默认只激活 6 个零配置渠道；小红书、Twitter、Reddit 这些需要登录的，Agent 会列菜单问你要哪些，点名才装
 
-安装完之后，`agent-reach doctor` 一条命令告诉你每个渠道的状态、当前走哪条路。
+安装完之后，`agent-reach doctor` 快速告诉你每个渠道的状态、当前走哪条路；
+需要验证真实网络能力时运行 `agent-reach doctor --deep`。
+OpenCLI 扩展断开时运行 `agent-reach ensure-opencli`。
 </details>
 
 ---
@@ -188,7 +190,7 @@ channels/
 | 场景 | 首选 | 备选 | 为什么这么选 |
 |------|------|------|-----------|
 | 读网页 | [Jina Reader](https://github.com/jina-ai/reader) | — | 免费，不需要 API Key |
-| 读推特 | [twitter-cli](https://github.com/public-clis/twitter-cli) | [OpenCLI](https://github.com/jackwener/opencli) | 实测搜索稳定；OpenCLI 走浏览器登录态兜底 |
+| 读推特 | [OpenCLI](https://github.com/jackwener/opencli) | [twitter-cli](https://github.com/public-clis/twitter-cli) | 桌面搜索走浏览器登录态；twitter-cli 读取稳定，搜索可能 404 |
 | Reddit | [OpenCLI](https://github.com/jackwener/opencli)（桌面） | [rdt-cli](https://github.com/public-clis/rdt-cli) | 匿名接口已被封、官方 API 审批制——只剩登录态路线 |
 | YouTube 字幕 + 搜索 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | — | 154K Star，YouTube 仍是最佳（注意：不再用于 B站） |
 | B站 | [bili-cli](https://github.com/public-clis/bilibili-cli) | OpenCLI ▸ 搜索 API | yt-dlp 被 B站风控 412 封死（2026-06 实测），bili-cli 无登录可搜可读 |
@@ -281,13 +283,20 @@ Star 一下，下次需要的时候能找到。⭐
 <details>
 <summary><strong>AI Agent 怎么搜索 Twitter / X？不想付 API 费用</strong></summary>
 
-Agent Reach 使用 [twitter-cli](https://github.com/public-clis/twitter-cli) 通过 Cookie 认证访问 Twitter，完全免费。安装：`pipx install twitter-cli`，确保浏览器已登录 x.com，Agent 就可以用 `twitter search "关键词"` 搜索、`twitter tweet URL` 读推文了。
+桌面端搜索优先使用 OpenCLI，浏览器登录 x.com 后运行
+`opencli twitter search "关键词" -f yaml`。Agent Reach 也支持
+[twitter-cli](https://github.com/public-clis/twitter-cli) 的稳定读取命令
+（`feed`、`user-posts`、`tweet`）；其 0.8.5 搜索受上游
+`x_client_transaction` 故障影响，不应用作搜索兜底。
 </details>
 
 <details>
 <summary><strong>How to search Twitter/X with AI agent for free (no API)?</strong></summary>
 
-Agent Reach uses twitter-cli with cookie auth — zero API fees. Install with `pipx install twitter-cli`, make sure you're logged into x.com in your browser, then your agent can search with `twitter search "query"` and read tweets with `twitter tweet URL`.
+On desktop, prefer `opencli twitter search "query" -f yaml` after logging into
+x.com in Chrome. Agent Reach still supports stable twitter-cli reads
+(`feed`, `user-posts`, `tweet`); twitter-cli 0.8.5 search is affected by an
+upstream `x_client_transaction` failure and should not be used as a search fallback.
 </details>
 
 <details>
@@ -299,7 +308,7 @@ Reddit 所有访问都需要登录态（匿名接口已被全面封锁，官方 
 <details>
 <summary><strong>How to get YouTube video transcripts for AI?</strong></summary>
 
-`yt-dlp --dump-json "https://youtube.com/watch?v=xxx"` extracts video metadata; `yt-dlp --write-sub --skip-download "URL"` extracts subtitles. Uses yt-dlp under the hood, supports multiple languages. No API key needed.
+`yt-dlp --dump-json "https://youtube.com/watch?v=xxx"` extracts video metadata; `yt-dlp --write-sub --skip-download -o "$DOWNLOAD_DIR/%(id)s" "URL"` extracts subtitles. Uses yt-dlp under the hood, supports multiple languages. No API key needed. Agent Reach downloads default to `E:\agent-reach\技能下载文件` on this Windows machine; set `AGENT_REACH_DOWNLOAD_DIR` to override.
 </details>
 
 <details>

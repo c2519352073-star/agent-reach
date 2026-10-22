@@ -47,6 +47,7 @@ class RedditChannel(Channel):
     def check(self, config=None):
         """Probe candidates in order; first fully-usable backend wins."""
         self.active_backend = None
+        self._check_config = config
         findings = []
 
         for backend in self.ordered_backends(config):
@@ -77,11 +78,28 @@ class RedditChannel(Channel):
             "中国大陆访问 Reddit 需要代理"
         )
 
+    def check_quick(self, config=None):
+        self.active_backend = None
+        self._check_config = config
+        finding = None
+        for backend in self.ordered_backends(config):
+            result = self._check_opencli() if backend == "OpenCLI" else self._check_rdt()
+            if result is None:
+                continue
+            if result[0] == "ok":
+                self.active_backend = backend
+                return result
+            finding = finding or (backend, *result)
+        if finding:
+            self.active_backend = finding[0]
+            return finding[1], finding[2]
+        return "warn", "未检测到 Reddit 后端；运行 doctor --deep 获取详细处方"
+
     def _check_opencli(self):
         """OpenCLI candidate. None = not installed."""
-        from agent_reach.backends import opencli_status
+        from agent_reach.backends import opencli_status_for
 
-        st = opencli_status()
+        st = opencli_status_for(getattr(self, "_check_config", None))
         if not st.installed:
             return None
         if st.broken:

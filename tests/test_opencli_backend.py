@@ -3,6 +3,7 @@
 
 from unittest.mock import patch
 
+import agent_reach.backends.opencli as opencli_backend
 from agent_reach.backends import opencli_status, opencli_summary
 from agent_reach.probe import ProbeResult
 
@@ -48,6 +49,31 @@ def test_daemon_running_extension_connected_is_ready():
     assert st.installed and st.daemon_running and st.extension_connected
     assert st.ready
     assert "1.8.3" in opencli_summary(st)
+
+
+def test_v2_json_daemon_status_is_ready():
+    daemon_out = (
+        '{"ok":true,"data":{"running":true,"extensionConnected":true,'
+        '"profiles":[{"contextId":"profile-1","extensionConnected":true}]}}'
+    )
+    st, _ = _status_with(
+        ProbeResult("ok", output="2.0.2"),
+        ProbeResult("ok", output=daemon_out),
+    )
+    assert st.daemon_running and st.extension_connected
+    assert st.ready
+    assert "2.0.2" in opencli_summary(st)
+
+
+def test_v2_json_daemon_not_running_parsed_correctly():
+    st, _ = _status_with(
+        ProbeResult("ok", output="2.0.2"),
+        ProbeResult("ok", output='{"ok":true,"data":{"running":false}}'),
+    )
+    assert st.installed
+    assert not st.daemon_running
+    assert not st.extension_connected
+    assert "自动启动" in opencli_summary(st)
 
 
 def test_extension_never_installed_not_ready_with_store_guide():
@@ -98,3 +124,49 @@ def test_probe_uses_daemon_status_not_doctor():
     )
     assert ["daemon", "status"] in calls
     assert ["doctor"] not in calls
+
+
+def test_find_unpacked_extension_from_secure_preferences(tmp_path, monkeypatch):
+    user_data = tmp_path / "Chrome"
+    profile = user_data / "Profile 1"
+    extension = tmp_path / ".opencli" / "extensions" / "opencli-extension-v1.0.26"
+    profile.mkdir(parents=True)
+    extension.mkdir(parents=True)
+    (profile / "Secure Preferences").write_text(
+        '{"extensions":{"settings":{"abc123":{"path":"' +
+        str(extension).replace("\\", "\\\\") +
+        '"}}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(opencli_backend, "_chrome_profile_roots", lambda: [str(user_data)])
+    profiles = opencli_backend.find_opencli_profiles()
+    assert len(profiles) == 1
+    assert profiles[0].profile == "Profile 1"
+    assert profiles[0].extension_path == str(extension)
+
+
+def test_ensure_opencli_launches_matching_profile(monkeypatch):
+    disconnected = opencli_backend.OpenCLIStatus(installed=True, daemon_running=True)
+    connected = opencli_backend.OpenCLIStatus(
+        installed=True,
+        daemon_running=True,
+        extension_connected=True,
+    )
+    installation = opencli_backend.OpenCLIProfileInstallation(
+        profile="Profile 1",
+        user_data_dir="C:/Chrome",
+        extension_path="C:/Users/chen/.opencli/extensions/opencli-extension-v1.0.26",
+        extension_id="unpacked",
+    )
+    states = iter([disconnected, connected])
+    monkeypatch.setattr(opencli_backend, "opencli_status", lambda: next(states))
+    monkeypatch.setattr(opencli_backend, "find_opencli_profiles", lambda: [installation])
+    monkeypatch.setattr(opencli_backend, "_launch_chrome_profile", lambda _p: True)
+    monkeypatch.setattr(opencli_backend.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        opencli_backend.time,
+        "monotonic",
+        iter([0, 0, 1, 2]).__next__,
+    )
+    status = opencli_backend.ensure_opencli_ready(timeout=2)
+    assert status.extension_connected

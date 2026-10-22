@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from urllib.error import URLError
 
+import pytest
+
 from agent_reach.channels import get_all_channels, get_channel
 from agent_reach.channels.v2ex import V2EXChannel
 from agent_reach.channels.xiaohongshu import XiaoHongShuChannel
@@ -326,7 +328,55 @@ class TestV2EXChannel:
         assert "V2EX" in result[0]["error"]
 
 
+def test_run_opencli_json_unwraps_2x_envelope(monkeypatch):
+    import agent_reach.channels.xueqiu as xueqiu_mod
+
+    monkeypatch.setattr(xueqiu_mod.shutil, "which", lambda _name: "opencli")
+    monkeypatch.setattr(
+        xueqiu_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            '{"ok": true, "data": [{"symbol": "SH600519"}]}',
+            "",
+        ),
+    )
+
+    assert xueqiu_mod._run_opencli_json("search", "茅台") == [
+        {"symbol": "SH600519"}
+    ]
+
+
+def test_run_opencli_json_reports_2x_error_envelope(monkeypatch):
+    import agent_reach.channels.xueqiu as xueqiu_mod
+
+    monkeypatch.setattr(xueqiu_mod.shutil, "which", lambda _name: "opencli")
+    monkeypatch.setattr(
+        xueqiu_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            1,
+            '{"ok": false, "error": {"code": "failed", "message": "boom", "hint": "retry"}}',
+            "",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="boom：retry"):
+        xueqiu_mod._run_opencli_json("hot")
+
+
 class TestXueqiuChannel:
+    @pytest.fixture(autouse=True)
+    def _disable_opencli(self, monkeypatch):
+        import agent_reach.channels.xueqiu as xueqiu_mod
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("OpenCLI disabled in unit test")
+
+        monkeypatch.setattr(xueqiu_mod, "_run_opencli_json", unavailable)
+
     def test_can_handle_xueqiu_urls(self):
         ch = XueqiuChannel()
         assert ch.can_handle("https://xueqiu.com/S/SH600519")
@@ -375,6 +425,20 @@ class TestXueqiuChannel:
         status, msg = XueqiuChannel().check()
         assert status == "warn"
         assert "失败" in msg
+
+    def test_check_prefers_opencli(self, monkeypatch):
+        import agent_reach.channels.xueqiu as xueqiu_mod
+
+        monkeypatch.setattr(
+            xueqiu_mod,
+            "_run_opencli_json",
+            lambda *args: [{"symbol": "SH000001", "name": "上证指数"}],
+        )
+        ch = XueqiuChannel()
+        status, msg = ch.check()
+        assert status == "ok"
+        assert "OpenCLI" in msg
+        assert ch.active_backend == "OpenCLI"
 
     # ------------------------------------------------------------------ #
     # get_stock_quote
@@ -428,6 +492,40 @@ class TestXueqiuChannel:
         assert quote["current"] == 1800.0
         assert quote["percent"] == 1.5
         assert quote["volume"] == 12345678
+
+    def test_get_stock_quote_via_opencli(self, monkeypatch):
+        import agent_reach.channels.xueqiu as xueqiu_mod
+
+        monkeypatch.setattr(
+            xueqiu_mod,
+            "_run_opencli_json",
+            lambda *args: [
+                {
+                    "symbol": "NVDA",
+                    "name": "英伟达",
+                    "price": 216.47,
+                    "change": -0.62,
+                    "changePercent": "-0.29%",
+                    "high": 218.46,
+                    "low": 212.77,
+                    "open": 215.98,
+                    "prevClose": 217.09,
+                    "volume": 79609078,
+                    "amount": "172.37亿",
+                    "marketCap": "5.22万亿",
+                    "turnover_rate": "0.33%",
+                    "time": "2026-10-20T20:00:00.588Z",
+                }
+            ],
+        )
+        ch = XueqiuChannel()
+        ch.active_backend = "OpenCLI"
+        quote = ch.get_stock_quote("NVDA")
+        assert quote["symbol"] == "NVDA"
+        assert quote["name"] == "英伟达"
+        assert quote["current"] == 216.47
+        assert quote["percent"] == -0.29
+        assert quote["last_close"] == 217.09
 
     # ------------------------------------------------------------------ #
     # search_stock

@@ -11,6 +11,9 @@ from .opencli import (  # noqa: F401
     OPENCLI_EXTENSION_URL,
     OPENCLI_PACKAGE,
     OpenCLIStatus,
+    ensure_opencli_ready,
+    find_opencli_profiles,
     opencli_status,
+    opencli_status_for,
     opencli_summary,
 )

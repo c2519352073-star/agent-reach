@@ -74,8 +74,8 @@ yt-dlp --write-sub --skip-download -o "/tmp/%(id)s" "URL"
 # V2EX hot topics
 curl -s "https://www.v2ex.com/api/topics/hot.json" -H "User-Agent: agent-reach/1.0"
 
-# Bilibili search (bili-cli, no login needed)
-bili search "query" --type video -n 5
+# Bilibili search (UTF-8 output is forced automatically)
+agent-reach bili search "query" --type video -n 5
 ```
 
 ## Login-backed platforms (pick by doctor's active_backend)

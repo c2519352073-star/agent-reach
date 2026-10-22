@@ -165,6 +165,7 @@ class XiaoHongShuChannel(Channel):
         of three half-relevant ones.
         """
         self.active_backend = None
+        self._check_config = config
         findings = []  # (backend, status, message)
 
         for backend in self.ordered_backends(config):
@@ -194,11 +195,33 @@ class XiaoHongShuChannel(Channel):
             f"  服务器：xiaohongshu-mcp（自带无头浏览器+扫码登录）：{_MCP_INSTALL_URL}"
         )
 
+    def check_quick(self, config=None):
+        self.active_backend = None
+        self._check_config = config
+        finding = None
+        for backend in self.ordered_backends(config):
+            if backend == "OpenCLI":
+                result = self._check_opencli()
+            elif backend == "xiaohongshu-mcp":
+                result = self._check_mcp()
+            else:
+                result = self._check_xhs_cli()
+            if result is None:
+                continue
+            if result[0] == "ok":
+                self.active_backend = backend
+                return result
+            finding = finding or (backend, *result)
+        if finding:
+            self.active_backend = finding[0]
+            return finding[1], finding[2]
+        return "warn", "未检测到小红书后端；运行 doctor --deep 获取详细处方"
+
     def _check_opencli(self):
         """OpenCLI candidate. None = not installed."""
-        from agent_reach.backends import opencli_status
+        from agent_reach.backends import opencli_status_for
 
-        st = opencli_status()
+        st = opencli_status_for(getattr(self, "_check_config", None))
         if not st.installed:
             return None
         if st.broken:

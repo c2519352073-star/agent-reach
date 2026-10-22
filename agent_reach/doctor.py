@@ -4,35 +4,69 @@
 Each channel knows how to check itself. Doctor just collects the results.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
+
 from agent_reach.config import Config
 from agent_reach.channels import get_all_channels
 
 
-def check_all(config: Config) -> Dict[str, dict]:
+def _check_channel(ch, config, deep: bool):
+    try:
+        checker = ch.check if deep else getattr(ch, "check_quick", ch.check)
+        status, message = checker(config)
+        active = getattr(ch, "active_backend", None)
+    except Exception as e:  # noqa: BLE001 — doctor must survive any channel
+        # Channels are registry singletons: a stale active_backend from a
+        # previous check must not leak into an errored result.
+        status, message, active = "error", f"体检异常：{e}", None
+    return ch.name, {
+        "status": status,
+        "name": ch.description,
+        "message": message,
+        "tier": ch.tier,
+        "backends": ch.backends,
+        "active_backend": active,
+    }
+
+
+def check_all(config: Config, *, deep: bool = False, max_workers: int = 6) -> Dict[str, dict]:
     """Check all channels and return status dict.
 
     A single misbehaving channel must never take the whole report down,
     so per-channel exceptions degrade to status="error".
     """
-    results = {}
-    for ch in get_all_channels():
+    channels = list(get_all_channels())
+    if not channels:
+        return {}
+
+    # OpenCLI serves several channels. Probe it once so parallel workers can
+    # share the result instead of spawning two subprocesses per channel.
+    shared_opencli = None
+    if config is not None and any("OpenCLI" in getattr(ch, "backends", []) for ch in channels):
         try:
-            status, message = ch.check(config)
-            active = getattr(ch, "active_backend", None)
-        except Exception as e:  # noqa: BLE001 — doctor must survive any channel
-            # Channels are registry singletons: a stale active_backend from a
-            # previous check must not leak into an errored result.
-            status, message, active = "error", f"体检异常：{e}", None
-        results[ch.name] = {
-            "status": status,
-            "name": ch.description,
-            "message": message,
-            "tier": ch.tier,
-            "backends": ch.backends,
-            "active_backend": active,
-        }
-    return results
+            from agent_reach.backends.opencli import opencli_status
+
+            shared_opencli = opencli_status()
+            setattr(config, "_doctor_opencli_status", shared_opencli)
+        except Exception:
+            shared_opencli = None
+
+    workers = max(1, min(int(max_workers or 1), len(channels)))
+    try:
+        if workers == 1:
+            pairs = [_check_channel(ch, config, deep) for ch in channels]
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="doctor") as pool:
+                pairs = list(pool.map(lambda ch: _check_channel(ch, config, deep), channels))
+    finally:
+        if config is not None:
+            try:
+                delattr(config, "_doctor_opencli_status")
+            except AttributeError:
+                pass
+
+    return dict(pairs)
 
 
 def _name_msg(r: dict, escape) -> str:

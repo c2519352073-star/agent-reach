@@ -46,6 +46,7 @@ class BilibiliChannel(Channel):
     def check(self, config=None):
         """Probe candidates in order; first fully-usable backend wins."""
         self.active_backend = None
+        self._check_config = config
         findings = []
 
         for backend in self.ordered_backends(config):
@@ -79,6 +80,28 @@ class BilibiliChannel(Channel):
             "  或桌面装 OpenCLI（额外解锁字幕）：agent-reach install --channels opencli"
         )
 
+    def check_quick(self, config=None):
+        self.active_backend = None
+        self._check_config = config
+        finding = None
+        for backend in self.ordered_backends(config):
+            if backend == "bili-cli":
+                result = self._check_bili_cli()
+            elif backend == "OpenCLI":
+                result = self._check_opencli()
+            else:
+                result = None
+            if result is None:
+                continue
+            if result[0] == "ok":
+                self.active_backend = backend
+                return result
+            finding = finding or (backend, *result)
+        if finding:
+            self.active_backend = finding[0]
+            return finding[1], finding[2]
+        return "warn", "未检测到 B站后端；运行 doctor --deep 获取详细处方"
+
     def _check_bili_cli(self):
         """bili-cli candidate. None = not installed."""
         probe = probe_command("bili", ["--version"], timeout=10, package="bilibili-cli")
@@ -89,15 +112,16 @@ class BilibiliChannel(Channel):
         if not probe.ok:
             return "warn", f"bili-cli 探测失败（{probe.status}），运行 `bili status` 查看详情"
         return "ok", (
-            "bili-cli 可用（搜索/热门/排行/视频详情/音频，无需登录；"
-            "字幕需 OpenCLI。上游 2026-03 起停更）"
+            "bili-cli 可用（统一使用 `agent-reach bili ...` 调用；"
+            "搜索/热门/排行/视频详情/音频，无需登录；"
+            "字幕需 OpenCLI 且需在 Chrome 登录 B站。上游 2026-03 起停更）"
         )
 
     def _check_opencli(self):
         """OpenCLI candidate. None = not installed."""
-        from agent_reach.backends import opencli_status
+        from agent_reach.backends import opencli_status_for
 
-        st = opencli_status()
+        st = opencli_status_for(getattr(self, "_check_config", None))
         if not st.installed:
             return None
         if st.broken:

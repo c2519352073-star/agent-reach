@@ -63,7 +63,11 @@ xhs feed                    # 推荐
 >
 > **写操作（发帖/评论/点赞）**: 建议只读。xhs-cli v0.6.x 写操作可能因签名问题返回 406。
 
-## Twitter/X (twitter-cli)
+## Twitter/X（OpenCLI 搜索首选，twitter-cli 读取兜底）
+
+> 桌面端 `doctor` 会优先选择 OpenCLI。`twitter-cli 0.8.5` 的搜索仍受
+> `x_client_transaction` 上游故障影响并返回 404；该版本也是当前 PyPI 最新版。
+> 在没有 OpenCLI 的环境里，twitter-cli 只用于稳定的读取命令。
 
 ### 稳定命令
 
@@ -84,22 +88,33 @@ twitter user-posts @username -n 20
 twitter user @username
 ```
 
-### 可能不稳定的命令
+### 搜索：只走 OpenCLI
 
 ```bash
-# 搜索推文（Twitter 频繁改 GraphQL 端点，可能 404）
+agent-reach twitter-search "query" -f yaml
+opencli twitter search "query" -f yaml
+```
+
+> `agent-reach twitter-search` 固定使用前台标签和持久站点会话；这是为了避开
+> OpenCLI 后台标签偶发的 `TypeError: Failed to fetch`。
+> 若 adapter 仍发生该错误，命令会自动改抓 x.com 搜索页内容；不会回退到
+> `twitter-cli search`。
+
+### twitter-cli 搜索：不要使用
+
+```bash
+# 已知上游故障，可能返回 HTTP 404
 twitter search "query" -n 10
 
 # likes（2024 年后只能看自己的，平台限制）
 twitter likes
 ```
 
-### search 失败时的重试链（按序执行，成功即停）
+### search 失败时的处理
 
-1. 直接重试一次（偶发失败常见）：`twitter search "query" -n 10`
-2. 升级后再试：`pipx upgrade twitter-cli && twitter search "query" -n 10`
-3. 换 OpenCLI 备选（桌面，复用浏览器登录态）：`opencli twitter search "query" -f yaml`
-4. 都不行就改用 `twitter feed` / `twitter user-posts @somebody` 等稳定命令绕路
+1. 桌面使用稳定入口：`agent-reach twitter-search "query" -f yaml`
+2. OpenCLI 不可用时改用 `twitter feed`、`twitter user-posts`、`twitter tweet`
+3. 不要反复升级 twitter-cli；0.8.5 已是 PyPI 最新版，问题在上游依赖
 
 ### 重要注意事项
 
@@ -119,13 +134,22 @@ twitter likes
 
 ```bash
 # 搜索 / 热门 / 视频详情（bili-cli，只读无需登录）
-bili search "query" --type video -n 5
-bili hot -n 10
-bili video BVxxx
+agent-reach bili search "query" --type video -n 5
+agent-reach bili hot -n 10
+agent-reach bili video BVxxx
 
 # 字幕（OpenCLI，需桌面 Chrome）
 opencli bilibili subtitle BVxxx
 ```
+
+> Windows 下统一使用 `agent-reach bili ...`。封装会设置 `PYTHONUTF8=1` 和
+> `PYTHONIOENCODING=utf-8`，避免 `bili-cli` 中文 JSON/YAML 出现乱码。
+>
+> 字幕接口对多数视频要求登录态。先运行：
+> `opencli auth status --site bilibili --full -f json`
+>
+> 退出码 `77` / `AUTH_REQUIRED` 不是解析器故障；在 OpenCLI 使用的 Chrome
+> Profile 中登录 `bilibili.com` 后重试。
 
 > 详细命令（音频转写、API 直连兜底）见 [references/video.md](video.md)。
 

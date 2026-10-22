@@ -26,6 +26,28 @@ def get_ytdlp_config_path() -> Path:
     return get_ytdlp_config_dir() / "config"
 
 
+def get_agent_reach_download_dir(config=None) -> Path:
+    """Return the persistent output/download directory used by Agent Reach.
+
+    Priority: AGENT_REACH_DOWNLOAD_DIR, config download_dir, then E: on
+    Windows when available, otherwise ~/Downloads/agent-reach.
+    """
+
+    override = os.environ.get("AGENT_REACH_DOWNLOAD_DIR")
+    if not override and config is not None:
+        override = getattr(config, "data", {}).get("download_dir")
+
+    if override:
+        root = Path(os.path.expandvars(os.path.expanduser(str(override))))
+    elif sys.platform == "win32" and Path("E:/").is_dir():
+        root = Path("E:/agent-reach/技能下载文件")
+    else:
+        root = Path.home() / "Downloads" / "agent-reach"
+
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def render_ytdlp_fix_command() -> str:
     """Return an OS-appropriate command to enable Node.js as yt-dlp JS runtime."""
 

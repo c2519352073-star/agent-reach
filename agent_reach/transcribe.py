@@ -22,6 +22,7 @@ from typing import List, Optional
 import requests
 
 from agent_reach.config import Config
+from agent_reach.utils.paths import get_agent_reach_download_dir
 
 # Whisper API limit is 25MB; leave headroom for multipart overhead.
 SIZE_LIMIT_BYTES = 24 * 1024 * 1024
@@ -78,9 +79,13 @@ def download_audio(url: str, out_dir: Path) -> Path:
     """Download audio with yt-dlp into out_dir; return the resulting file path."""
     _require("yt-dlp")
     template = out_dir / "source.%(ext)s"
+    cache_dir = out_dir / ".cache" / "yt-dlp"
+    cache_dir.mkdir(parents=True, exist_ok=True)
     _run(
         [
             "yt-dlp",
+            "--cache-dir",
+            str(cache_dir),
             "-x",
             "--audio-format",
             "m4a",
@@ -224,7 +229,12 @@ def transcribe(
         names = ", ".join(PROVIDERS[p]["key_field"] for p in order)
         raise NoProviderConfigured(f"no provider key configured (need one of: {names})")
 
-    work_dir = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="transcribe-"))
+    if out_dir:
+        work_dir = Path(out_dir)
+    else:
+        download_root = get_agent_reach_download_dir(cfg)
+        download_root.mkdir(parents=True, exist_ok=True)
+        work_dir = Path(tempfile.mkdtemp(prefix="transcribe-", dir=str(download_root)))
     work_dir.mkdir(parents=True, exist_ok=True)
 
     src_path = Path(source)

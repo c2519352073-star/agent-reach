@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for doctor module."""
 
+import time
+
 import pytest
 
 import agent_reach.doctor as doctor
@@ -124,3 +126,67 @@ def test_stale_active_backend_does_not_leak_into_errored_result(monkeypatch):
     results = doctor.check_all(config=None)
     assert results["boom"]["status"] == "error"
     assert results["boom"]["active_backend"] is None
+
+
+def test_quick_mode_uses_fast_checks(monkeypatch):
+    class _QuickChannel(_StubChannel):
+        def __init__(self):
+            super().__init__("quick", "快速", 0, "ok", "deep")
+            self.quick_calls = 0
+
+        def check(self, config=None):
+            raise AssertionError("deep check must not run in quick mode")
+
+        def check_quick(self, config=None):
+            self.quick_calls += 1
+            return "ok", "quick"
+
+    channel = _QuickChannel()
+    monkeypatch.setattr(doctor, "get_all_channels", lambda: [channel])
+    results = doctor.check_all(config=None)
+    assert results["quick"]["message"] == "quick"
+    assert channel.quick_calls == 1
+
+
+def test_check_all_runs_channels_in_parallel(monkeypatch):
+    class _SlowChannel(_StubChannel):
+        def check(self, config=None):
+            time.sleep(0.2)
+            return "ok", self.name
+
+    channels = [
+        _SlowChannel(f"slow{i}", f"慢{i}", 0, "ok", "")
+        for i in range(4)
+    ]
+    monkeypatch.setattr(doctor, "get_all_channels", lambda: channels)
+    started = time.monotonic()
+    results = doctor.check_all(config=None, deep=True, max_workers=4)
+    elapsed = time.monotonic() - started
+    assert len(results) == 4
+    assert elapsed < 0.55
+
+
+def test_opencli_probe_is_shared_once(monkeypatch, tmp_config):
+    class _OpenCLIChannel(_StubChannel):
+        def __init__(self, name):
+            super().__init__(name, name, 1, "ok", "ok", ["OpenCLI"])
+
+        def check(self, config=None):
+            assert getattr(config, "_doctor_opencli_status", None) == "shared"
+            return "ok", "ok"
+
+    calls = []
+
+    def fake_status():
+        calls.append(1)
+        return "shared"
+
+    monkeypatch.setattr("agent_reach.backends.opencli.opencli_status", fake_status)
+    monkeypatch.setattr(
+        doctor,
+        "get_all_channels",
+        lambda: [_OpenCLIChannel("twitter"), _OpenCLIChannel("reddit")],
+    )
+    results = doctor.check_all(tmp_config, deep=True, max_workers=2)
+    assert set(results) == {"twitter", "reddit"}
+    assert calls == [1]

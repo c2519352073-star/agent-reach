@@ -68,3 +68,11 @@ class Channel(ABC):
         """
         self.active_backend = self.backends[0] if self.backends else "内置"
         return "ok", f"{'、'.join(self.backends) if self.backends else '内置'}"
+
+    def check_quick(self, config=None) -> Tuple[str, str]:
+        """Fast health check used by default by ``agent-reach doctor``.
+
+        Slow channels can override this to avoid live network probes. The
+        full functional check remains available through ``doctor --deep``.
+        """
+        return self.check(config)

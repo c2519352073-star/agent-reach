@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Twitter/X — check if twitter-cli or bird CLI is available."""
+"""Twitter/X — check available desktop and CLI backends."""
+
+from agent_reach.probe import probe_command
 
 from .base import Channel
-from agent_reach.probe import probe_command
 
 
 class TwitterChannel(Channel):
     name = "twitter"
     description = "Twitter/X 推文"
-    backends = ["twitter-cli", "OpenCLI", "bird CLI (legacy)"]
+    backends = ["OpenCLI", "twitter-cli", "bird CLI (legacy)"]
     tier = 1
 
     def can_handle(self, url: str) -> bool:
@@ -24,6 +25,7 @@ class TwitterChannel(Channel):
         会把排在后面、完整可用的 OpenCLI 挡在门外。
         """
         self.active_backend = None
+        self._check_config = config
         findings = []
 
         for backend in self.ordered_backends(config):
@@ -38,6 +40,9 @@ class TwitterChannel(Channel):
 
             if result is None:
                 continue  # 未安装——不参与候选
+            if result[0] == "ok":
+                self.active_backend = backend
+                return result
             findings.append((backend, *result))
 
         for wanted in ("ok", "warn"):
@@ -55,6 +60,26 @@ class TwitterChannel(Channel):
             "或：\n"
             "  uv tool install twitter-cli"
         )
+
+    def check_quick(self, config=None):
+        """Prefer OpenCLI without waiting for twitter-cli network probes."""
+        self.active_backend = None
+        self._check_config = config
+        opencli = self._check_opencli()
+        if opencli is not None and opencli[0] == "ok":
+            self.active_backend = "OpenCLI"
+            return opencli
+
+        probe = probe_command("twitter", ["--version"], timeout=3, package="twitter-cli")
+        if probe.ok:
+            self.active_backend = "twitter-cli"
+            return "warn", (
+                "twitter-cli 已安装，读取命令可用；搜索受上游 x_client_transaction "
+                "故障影响。搜索请使用 OpenCLI，运行 doctor --deep 验证读取状态"
+            )
+        if opencli is not None:
+            return opencli
+        return "warn", "未检测到可用 Twitter 后端。运行 doctor --deep 获取详细处方"
 
     def _check_twitter_cli(self):
         """探测 twitter-cli。返回 None 表示未安装，否则返回 (status, message)。
@@ -76,8 +101,8 @@ class TwitterChannel(Channel):
         output = probe.output
         if "ok: true" in output:
             return "ok", (
-                "twitter-cli 完整可用（搜索、读推文、时间线、长文/Article、"
-                "用户查询、Thread）"
+                "twitter-cli 登录可用（读取、时间线、长文/Article 稳定；"
+                "搜索可能返回 404）"
             )
         if "not_authenticated" in output:
             return "warn", (
@@ -93,17 +118,19 @@ class TwitterChannel(Channel):
 
     def _check_opencli(self):
         """OpenCLI candidate. None = not installed."""
-        from agent_reach.backends import opencli_status
+        from agent_reach.backends import opencli_status_for
 
-        st = opencli_status()
+        st = opencli_status_for(getattr(self, "_check_config", None))
         if not st.installed:
             return None
         if st.broken:
             return "error", st.hint
         if st.ready:
             return "ok", (
-                "OpenCLI 可用（复用浏览器登录态）。用法："
-                "opencli twitter search/article/user-posts -f yaml"
+                "OpenCLI 桌面首选可用（复用浏览器登录态）。用法："
+                "agent-reach twitter-search \"query\" 或 "
+                "opencli twitter search/article/user-posts -f yaml；"
+                "twitter-cli search 不参与搜索兜底"
             )
         return "warn", st.hint
 

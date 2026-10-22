@@ -45,7 +45,8 @@ metadata:
 ## 常驻规则（全程适用）
 
 1. **动手前先体检**：多后端平台（小红书/Reddit/B站/Twitter）先跑
-   `agent-reach doctor --json`，按各平台 `active_backend` 字段选命令组。
+   `agent-reach doctor --json`（默认快速模式），按各平台 `active_backend`
+   字段选命令组。需要真实网络功能测试时再跑 `agent-reach doctor --deep`。
 2. **声明你在用什么**：开始干活前说一句「使用 agent-reach 的 X 平台 / Y 后端」。
 3. **失败按 references 里的重试链处理**，不要瞎猜命令。
 4. **全网调研类任务**：组合多平台（Exa 搜索 + Twitter/Reddit 看讨论 + 小红书/B站看中文场景），并行收集再汇总。
@@ -79,20 +80,25 @@ curl -s "https://r.jina.ai/URL"
 gh search repos "query" --sort stars --limit 10
 
 # YouTube 字幕（注意：B站不要用 yt-dlp，见 video.md）
-yt-dlp --write-sub --skip-download -o "/tmp/%(id)s" "URL"
+yt-dlp --write-sub --skip-download -o "E:/agent-reach/技能下载文件/%(id)s" "URL"
+
+# 稳定封装入口
+agent-reach twitter-search "query" -f yaml
+agent-reach youtube-download "URL" --quality 720
 
 # V2EX 热门
 curl -s "https://www.v2ex.com/api/topics/hot.json" -H "User-Agent: agent-reach/1.0"
 
-# B站搜索（bili-cli，无需登录）
-bili search "query" --type video -n 5
+# B站搜索（自动修正 Windows UTF-8 输出）
+agent-reach bili search "query" --type video -n 5
 ```
 
 ## 需登录态的平台（按 doctor 的 active_backend 选命令）
 
 ```bash
-# Twitter 搜索（twitter-cli 首选；失败重试链见 social.md）
-twitter search "query" -n 10
+# Twitter 搜索（只走 OpenCLI；twitter-cli 搜索受上游故障影响）
+agent-reach twitter-search "query" -f yaml
+opencli twitter search "query" -f yaml
 
 # Reddit（无零配置路径：OpenCLI 或 rdt-cli，必须登录态）
 opencli reddit search "query" -f yaml   # 桌面
@@ -106,12 +112,19 @@ opencli xiaohongshu search "query" -f yaml
 
 ```bash
 # 检查可用 channel 与每个平台当前激活的后端
-agent-reach doctor --json
+agent-reach doctor --json          # 快速模式
+agent-reach doctor --deep --json   # 真实网络/功能探测
+
+# OpenCLI 扩展断开时恢复正确 Chrome Profile
+agent-reach ensure-opencli
 ```
 
 ## 工作区规则
 
-**不要在 agent workspace 创建文件。** 使用 `/tmp/` 存放临时输出，`~/.agent-reach/` 存放持久数据。
+**不要在 agent workspace 创建文件。** 本机默认把下载、转录和生成的临时文件放到
+`E:\agent-reach\技能下载文件`（Git Bash：`/e/agent-reach/技能下载文件`），
+不要把大文件写到 C 盘。可用 `AGENT_REACH_DOWNLOAD_DIR` 覆盖根目录。
+`~/.agent-reach/` 只保留配置和工具脚本。
 
 ## 详细文档
 

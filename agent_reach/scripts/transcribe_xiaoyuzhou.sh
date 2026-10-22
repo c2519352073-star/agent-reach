@@ -24,8 +24,21 @@ while [ $# -gt 0 ]; do
 done
 
 URL="${1:?用法: bash transcribe.sh [--polish] <小宇宙链接> [输出文件路径]}"
-OUTPUT="${2:-/tmp/podcast_transcript.txt}"
-TMPDIR="/tmp/xiaoyuzhou_$$"
+
+DOWNLOAD_DIR="${AGENT_REACH_DOWNLOAD_DIR:-}"
+if [ -z "$DOWNLOAD_DIR" ]; then
+    if [ -d /e ]; then
+        DOWNLOAD_DIR="/e/agent-reach/技能下载文件"
+    else
+        DOWNLOAD_DIR="$HOME/Downloads/agent-reach"
+    fi
+fi
+mkdir -p "$DOWNLOAD_DIR"
+
+OUTPUT="${2:-$DOWNLOAD_DIR/podcast_transcript_$(date '+%Y%m%d-%H%M%S').md}"
+mkdir -p "$(dirname "$OUTPUT")"
+WORK_ROOT="$DOWNLOAD_DIR/.tmp"
+WORKDIR="$WORK_ROOT/xiaoyuzhou_$$"
 
 # Try env var first, then agent-reach config.yaml
 if [ -z "$GROQ_API_KEY" ]; then
@@ -41,11 +54,14 @@ MAX_CHUNK_SIZE_MB=20
 AUDIO_BITRATE="64k"
 
 cleanup() {
-    rm -rf "$TMPDIR"
+    case "$WORKDIR" in
+        "$WORK_ROOT"/xiaoyuzhou_*) rm -rf -- "$WORKDIR" ;;
+    esac
+    rmdir "$WORK_ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-mkdir -p "$TMPDIR"
+mkdir -p "$WORKDIR"
 
 echo "📻 小宇宙播客转文字"
 echo "===================="
@@ -67,20 +83,20 @@ echo "🔗 音频: $AUDIO_URL"
 # Step 2: 下载音频
 echo "⬇️  正在下载音频..."
 EXT="${AUDIO_URL##*.}"
-curl -sL -o "$TMPDIR/original.$EXT" "$AUDIO_URL"
-FILE_SIZE=$(ls -lh "$TMPDIR/original.$EXT" | awk '{print $5}')
+curl -sL -o "$WORKDIR/original.$EXT" "$AUDIO_URL"
+FILE_SIZE=$(ls -lh "$WORKDIR/original.$EXT" | awk '{print $5}')
 echo "📦 文件大小: $FILE_SIZE"
 
 # Step 3: 获取时长
-DURATION=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$TMPDIR/original.$EXT" 2>/dev/null | cut -d. -f1)
+DURATION=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$WORKDIR/original.$EXT" 2>/dev/null | cut -d. -f1)
 DURATION_MIN=$((DURATION / 60))
 DURATION_SEC=$((DURATION % 60))
 echo "⏱️  时长: ${DURATION_MIN}分${DURATION_SEC}秒"
 
 # Step 4: 转为低码率单声道 MP3
 echo "🔄 正在转码..."
-ffmpeg -y -i "$TMPDIR/original.$EXT" -b:a "$AUDIO_BITRATE" -ac 1 "$TMPDIR/mono.mp3" 2>/dev/null
-MONO_SIZE=$(stat -c%s "$TMPDIR/mono.mp3" 2>/dev/null || stat -f%z "$TMPDIR/mono.mp3")
+ffmpeg -y -i "$WORKDIR/original.$EXT" -b:a "$AUDIO_BITRATE" -ac 1 "$WORKDIR/mono.mp3" 2>/dev/null
+MONO_SIZE=$(stat -c%s "$WORKDIR/mono.mp3" 2>/dev/null || stat -f%z "$WORKDIR/mono.mp3")
 echo "📦 转码后: $(echo "$MONO_SIZE / 1024 / 1024" | bc)MB"
 
 # Step 5: 按大小切片
@@ -88,7 +104,7 @@ MAX_BYTES=$((MAX_CHUNK_SIZE_MB * 1024 * 1024))
 
 if [ "$MONO_SIZE" -le "$MAX_BYTES" ]; then
     # 不需要切片
-    cp "$TMPDIR/mono.mp3" "$TMPDIR/chunk_0.mp3"
+    cp "$WORKDIR/mono.mp3" "$WORKDIR/chunk_0.mp3"
     NUM_CHUNKS=1
     echo "📎 无需切片"
 else
@@ -99,8 +115,8 @@ else
     
     for i in $(seq 0 $((NUM_CHUNKS - 1))); do
         START=$((i * CHUNK_DURATION))
-        ffmpeg -y -i "$TMPDIR/mono.mp3" -ss "$START" -t "$CHUNK_DURATION" -c copy "$TMPDIR/chunk_${i}.mp3" 2>/dev/null
-        CHUNK_SIZE=$(ls -lh "$TMPDIR/chunk_${i}.mp3" | awk '{print $5}')
+        ffmpeg -y -i "$WORKDIR/mono.mp3" -ss "$START" -t "$CHUNK_DURATION" -c copy "$WORKDIR/chunk_${i}.mp3" 2>/dev/null
+        CHUNK_SIZE=$(ls -lh "$WORKDIR/chunk_${i}.mp3" | awk '{print $5}')
         echo "   段 $((i+1))/$NUM_CHUNKS: $CHUNK_SIZE"
     done
 fi
@@ -114,7 +130,7 @@ for i in $(seq 0 $((NUM_CHUNKS - 1))); do
     RESPONSE=$(curl -s -w "\n%{http_code}" \
         https://api.groq.com/openai/v1/audio/transcriptions \
         -H "Authorization: Bearer $GROQ_API_KEY" \
-        -F file="@$TMPDIR/chunk_${i}.mp3" \
+        -F file="@$WORKDIR/chunk_${i}.mp3" \
         -F model="whisper-large-v3" \
         -F language="zh" \
         -F prompt="以下是一段中文普通话播客录音，请输出包含完整中文标点（，。？！：；“”‘’）的转写文本。" \
@@ -138,7 +154,7 @@ for i in $(seq 0 $((NUM_CHUNKS - 1))); do
             RESPONSE=$(curl -s -w "\n%{http_code}" \
                 https://api.groq.com/openai/v1/audio/transcriptions \
                 -H "Authorization: Bearer $GROQ_API_KEY" \
-                -F file="@$TMPDIR/chunk_${i}.mp3" \
+                -F file="@$WORKDIR/chunk_${i}.mp3" \
                 -F model="whisper-large-v3" \
                 -F language="zh" \
                 -F prompt="以下是一段中文普通话播客录音，请输出包含完整中文标点（，。？！：；“”‘’）的转写文本。" \
@@ -155,8 +171,8 @@ for i in $(seq 0 $((NUM_CHUNKS - 1))); do
         fi
     fi
     
-    echo "$BODY" > "$TMPDIR/transcript_${i}.txt"
-    CHARS=$(wc -m < "$TMPDIR/transcript_${i}.txt")
+    echo "$BODY" > "$WORKDIR/transcript_${i}.txt"
+    CHARS=$(wc -m < "$WORKDIR/transcript_${i}.txt")
     echo "✅ ($CHARS 字)"
 done
 
@@ -165,8 +181,8 @@ if [ "$POLISH" = "1" ]; then
     echo "✨ 正在润色（Llama 3.3 70B 加标点+分段）..."
     for i in $(seq 0 $((NUM_CHUNKS - 1))); do
         echo -n "   段 $((i+1))/$NUM_CHUNKS... "
-        IN_FILE="$TMPDIR/transcript_${i}.txt" \
-        OUT_FILE="$TMPDIR/polished_${i}.txt" \
+        IN_FILE="$WORKDIR/transcript_${i}.txt" \
+        OUT_FILE="$WORKDIR/polished_${i}.txt" \
         GROQ_API_KEY="$GROQ_API_KEY" \
         python3 <<'PY'
 import json, os, sys, urllib.request, urllib.error
@@ -252,10 +268,10 @@ echo "📄 正在合并文字稿..."
     echo ""
 
     for i in $(seq 0 $((NUM_CHUNKS - 1))); do
-        if [ "$POLISH" = "1" ] && [ -f "$TMPDIR/polished_${i}.txt" ]; then
-            cat "$TMPDIR/polished_${i}.txt"
+        if [ "$POLISH" = "1" ] && [ -f "$WORKDIR/polished_${i}.txt" ]; then
+            cat "$WORKDIR/polished_${i}.txt"
         else
-            cat "$TMPDIR/transcript_${i}.txt"
+            cat "$WORKDIR/transcript_${i}.txt"
         fi
         echo ""
     done

@@ -1,0 +1,136 @@
+--- a/clis/twitter/auth.js
++++ b/clis/twitter/auth.js
+@@ -1,15 +1,48 @@
+ import { AuthRequiredError, CommandExecutionError } from '@jackwener/opencli/errors';
+ import { registerSiteAuthCommands } from '../_shared/site-auth.js';
+-import { normalizeTwitterScreenName } from './shared.js';
++import {
++    normalizeTwitterGraphqlPayload,
++    normalizeTwitterScreenName,
++    resolveTwitterOperationMetadata,
++} from './shared.js';
++import { TWITTER_BEARER_TOKEN } from './utils.js';
+
+ const SCREEN_NAME_POLL_SECONDS = 1;
+ const SCREEN_NAME_POLLS = 8;
+ const SCREEN_NAME_AGREEMENTS = 3;
++const TWITTER_AUTHORIZATION = `Bearer ${decodeURIComponent(TWITTER_BEARER_TOKEN)}`;
++const USER_BY_REST_ID_OPERATION = {
++    queryId: 'mxaYWwt52eAb6OAzYHMVzg',
++    features: {
++        hidden_profile_subscriptions_enabled: true,
++        profile_label_improvements_pcf_label_in_post_enabled: true,
++        responsive_web_profile_redirect_enabled: true,
++        rweb_tipjar_consumption_enabled: false,
++        verified_phone_label_enabled: false,
++        highlights_tweets_tab_ui_enabled: true,
++        responsive_web_twitter_article_notes_tab_enabled: true,
++        subscriptions_feature_can_gift_premium: false,
++        creator_subscriptions_tweet_preview_api_enabled: true,
++        responsive_web_graphql_timeline_navigation_enabled: true,
++    },
++};
+
+-async function hasTwitterSessionCookies(page) {
++async function readTwitterSession(page) {
+   const cookies = await page.getCookies({ url: 'https://x.com' });
+-  const names = new Set(cookies.map(cookie => cookie.name));
+-  return names.has('auth_token') && names.has('ct0');
++    const values = Object.fromEntries(cookies.map(cookie => [cookie.name, cookie.value]));
++    let twid = values.twid || '';
++    try {
++        twid = decodeURIComponent(twid);
++    } catch {}
++    return {
++        authenticated: Boolean(values.auth_token && values.ct0),
++        ct0: values.ct0 || '',
++        userId: twid.replace(/^.*?u=/, ''),
++    };
++}
++
++async function hasTwitterSessionCookies(page) {
++    return (await readTwitterSession(page)).authenticated;
+ }
+
+ function unwrapTwitterEvaluateResult(value, label) {
+@@ -22,7 +55,7 @@
+   return value;
+ }
+
+-async function readScreenName(page) {
++async function readScreenNameFromDom(page) {
+   const href = unwrapTwitterEvaluateResult(await page.evaluate(`() => {
+     const link = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+     return link ? link.getAttribute('href') : null;
+@@ -33,6 +66,42 @@
+   return normalizeTwitterScreenName(typeof href === 'string' ? href : '');
+ }
+
++async function readScreenNameFromApi(page) {
++    const session = await readTwitterSession(page);
++    if (!session.ct0 || !/^\d+$/.test(session.userId)) return '';
++    const operation = await resolveTwitterOperationMetadata(
++        page,
++        'UserByRestId',
++        USER_BY_REST_ID_OPERATION,
++    );
++    const variables = { userId: session.userId, withSafetyModeUserFields: true };
++    const requestUrl = `/i/api/graphql/${operation.queryId}/UserByRestId`
++        + `?variables=${encodeURIComponent(JSON.stringify(variables))}`
++        + `&features=${encodeURIComponent(JSON.stringify(operation.features))}`;
++    const headers = JSON.stringify({
++        'Authorization': TWITTER_AUTHORIZATION,
++        'X-Csrf-Token': session.ct0,
++        'X-Twitter-Auth-Type': 'OAuth2Session',
++        'X-Twitter-Active-User': 'yes',
++        'Content-Type': 'application/json',
++    });
++    const data = normalizeTwitterGraphqlPayload(await page.evaluate(`async () => {
++        const response = await fetch(${JSON.stringify(requestUrl)}, {
++            credentials: 'include',
++            headers: ${headers},
++        });
++        return response.ok ? await response.json() : { error: { status: response.status } };
++    }`));
++    const user = data?.data?.user?.result;
++    return normalizeTwitterScreenName(
++        user?.core?.screen_name || user?.legacy?.screen_name || '',
++    );
++}
++
++async function readCurrentScreenName(page) {
++    return await readScreenNameFromDom(page) || await readScreenNameFromApi(page);
++}
++
+ /**
+  * Right after an account switch the home surface keeps showing the previous
+  * account for a few seconds, so a single read misreports it (#2252); trust
+@@ -40,8 +109,14 @@
+  */
+ async function readSettledScreenName(page) {
+   const samples = [];
++    let apiName = null;
+   for (let poll = 0; poll < SCREEN_NAME_POLLS; poll += 1) {
+-    samples.push(await readScreenName(page));
++        let sample = await readScreenNameFromDom(page);
++        if (!sample) {
++            if (apiName === null) apiName = await readScreenNameFromApi(page);
++            sample = apiName;
++        }
++        samples.push(sample);
+     if (poll < SCREEN_NAME_POLLS - 1) {
+       await page.sleep(SCREEN_NAME_POLL_SECONDS);
+     }
+@@ -59,10 +134,10 @@
+   await page.wait({ selector: '[data-testid="primaryColumn"]' }).catch(() => { });
+   // Login polls repeat every ~2s; they keep the single read and skip the #2252 settle loop.
+   const username = phase === 'poll'
+-    ? await readScreenName(page)
++        ? await readCurrentScreenName(page)
+     : await readSettledScreenName(page);
+   if (!username) {
+-    throw new AuthRequiredError('x.com', 'Could not detect the logged-in Twitter/X profile link');
++        throw new AuthRequiredError('x.com', 'Could not resolve the logged-in Twitter/X account');
+   }
+   return { username, url: `https://x.com/${username}` };
+ }
